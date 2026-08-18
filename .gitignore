@@ -1,0 +1,35 @@
+# 機密資料
+.env
+*.pfx
+*.p12
+*.pem
+*.key
+service_account.json
+
+# Python / Jupyter 暫存
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Pipeline 暫存與輸出
+cache_integrated_stock/
+output_integrated_stock/
+output_selector/
+log/
+
+# 真實交易與策略帳本
+strategy_ledger/
+holdings_entry_conditions.csv
+order_intent_template.csv
+
+# 舊版程式：本機保留，但不納入目前版本
+/Complete_Pullback_Fubon_Pipeline.ipynb
+/complete_pullback_fubon_pipeline.py
+/integrated_stock_pipeline_exitlog_fixed_strategy_ledger.py
+/integrated_stock_pipeline_strategy_complete.py
+/pullback_macdonly_daily_selector.py
+/run_complete_pullback_fubon_pipeline.py
+
+# Windows
+Thumbs.db
+Desktop.ini
