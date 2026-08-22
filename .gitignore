@@ -33,3 +33,6 @@ order_intent_template.csv
 # Windows
 Thumbs.db
 Desktop.ini
+
+# 舊版封存
+/v1_60天出場/
