@@ -665,8 +665,12 @@ def _latest_common_data_date(
     return pd.Timestamp(usable.index[usable][-1])
 
 
-def _print_signal_date_diagnostics(d: pd.Timestamp, indicators: dict) -> dict[str, int | bool]:
-    """Print individual counts and a cumulative funnel for the selected signal date."""
+def _print_signal_date_diagnostics(
+    d: pd.Timestamp,
+    indicators: dict,
+    adj_close: pd.DataFrame,
+) -> tuple[dict[str, int | bool], dict[str, pd.DataFrame]]:
+    """Print and return every cumulative screening layer for the signal date."""
     individual_names = [
         "stock_regime_filter",
         "bias_filter",
@@ -703,12 +707,52 @@ def _print_signal_date_diagnostics(d: pd.Timestamp, indicators: dict) -> dict[st
         ("+ foreign ratio 3D high", "foreign_ratio_new_high"),
     ]
     cumulative = None
+    funnel_frames: dict[str, pd.DataFrame] = {}
+    macd_change = indicators["macd_osc"] - indicators["macd_osc"].shift(1)
+
+    def make_stage_frame(
+        mask: pd.Series,
+        stage_order: int,
+        stage_key: str,
+        stage_label: str,
+    ) -> pd.DataFrame:
+        selected = mask.index[mask.fillna(False)]
+        stock_ids = [
+            str(stock_id).zfill(4) if str(stock_id).isdigit() else str(stock_id)
+            for stock_id in selected
+        ]
+        frame = pd.DataFrame({
+            "signal_date": d,
+            "stage_order": stage_order,
+            "stage_key": stage_key,
+            "stage_label": stage_label,
+            "stage_count": len(selected),
+            "stock_id": stock_ids,
+            "bias_at_signal": indicators["bias"].loc[d, selected].values,
+            "macd_osc_at_signal": indicators["macd_osc"].loc[d, selected].values,
+            "macd_osc_change_at_signal": macd_change.loc[d, selected].values,
+            "foreign_buy_positive": indicators["foreign_buy_positive"].loc[d, selected].values,
+            "foreign_ratio_new_high": indicators["foreign_ratio_new_high"].loc[d, selected].values,
+            "foreign_ratio_at_signal": indicators["foreign_ratio"].loc[d, selected].values,
+            "close_at_signal": adj_close.loc[d, selected].values,
+        })
+        return frame.sort_values("stock_id").reset_index(drop=True)
+
     print(f"\nSignal-date cumulative funnel ({d.date()}):")
-    for label, name in funnel_steps:
+    for stage_order, (label, name) in enumerate(funnel_steps, start=1):
         cumulative = rows[name].copy() if cumulative is None else cumulative & rows[name]
         count = int(cumulative.sum())
         stats[f"funnel_{name}"] = count
+        funnel_frames[f"{stage_order}_{name}"] = make_stage_frame(
+            cumulative,
+            stage_order,
+            name,
+            label,
+        )
         print(f"  {label:28s}: {count}")
+        if 0 < count <= 20:
+            passing = funnel_frames[f"{stage_order}_{name}"]["stock_id"].tolist()
+            print(f"    passing stocks: {', '.join(passing)}")
 
     before_market_count = int(rows["signal_before_market"].sum())
     stats["signal_before_market"] = before_market_count
@@ -717,8 +761,17 @@ def _print_signal_date_diagnostics(d: pd.Timestamp, indicators: dict) -> dict[st
 
     final_count = int(rows["signal_close_day"].sum())
     stats["signal_close_day"] = final_count
+    funnel_frames["6_market_filter"] = make_stage_frame(
+        rows["signal_close_day"],
+        6,
+        "market_filter",
+        "+ market filter",
+    )
     print(f"  {'+ market filter':28s}: {final_count}")
-    return stats
+    if 0 < final_count <= 20:
+        passing = funnel_frames["6_market_filter"]["stock_id"].tolist()
+        print(f"    passing stocks: {', '.join(passing)}")
+    return stats, funnel_frames
 
 
 def load_current_holdings(path: str | None) -> pd.DataFrame:
@@ -810,7 +863,11 @@ def build_daily_candidates(
     if not volume.loc[d].notna().any() or not foreign_buy.loc[d].notna().any():
         raise ValueError(f"指定訊號日 {d.date()} 的成交量或外資資料尚未齊全。")
 
-    condition_counts = _print_signal_date_diagnostics(d, indicators)
+    condition_counts, funnel_candidates = _print_signal_date_diagnostics(
+        d,
+        indicators,
+        adj_close,
+    )
     signal_row = indicators["signal_close_day"].loc[d].fillna(False)
     stock_ids = signal_row[signal_row].index.astype(str)
 
@@ -874,6 +931,7 @@ def build_daily_candidates(
         "all_candidates": candidates,
         "buy_list": buy_list,
         "condition_counts": condition_counts,
+        "funnel_candidates": funnel_candidates,
         "config": cfg.copy(),
     }
 
@@ -888,14 +946,36 @@ def save_daily_selection(result: dict, output_dir: str = "."):
 
     csv_all = outdir / f"{prefix}_{d}_all_candidates.csv"
     csv_buy = outdir / f"{prefix}_{d}_buy_list.csv"
+    csv_funnel = outdir / f"{prefix}_{d}_funnel_candidates.csv"
     xlsx = outdir / f"{prefix}_{d}.xlsx"
 
     result["all_candidates"].to_csv(csv_all, index=False, encoding="utf-8-sig")
     result["buy_list"].to_csv(csv_buy, index=False, encoding="utf-8-sig")
+    funnel_frames = result.get("funnel_candidates", {})
+    funnel_long = (
+        pd.concat(funnel_frames.values(), ignore_index=True)
+        if funnel_frames else pd.DataFrame()
+    )
+    funnel_long.to_csv(csv_funnel, index=False, encoding="utf-8-sig")
 
     with pd.ExcelWriter(xlsx) as writer:
         result["buy_list"].to_excel(writer, sheet_name="buy_list", index=False)
         result["all_candidates"].to_excel(writer, sheet_name="all_candidates", index=False)
+        funnel_long.to_excel(writer, sheet_name="funnel_all", index=False)
+        funnel_sheet_names = {
+            "1_stock_regime_filter": "F1_stock_regime",
+            "2_bias_filter": "F2_plus_BIAS",
+            "3_macd_osc_rising": "F3_plus_MACD",
+            "4_foreign_buy_positive": "F4_plus_foreign_buy",
+            "5_foreign_ratio_new_high": "F5_plus_foreign_3Dhigh",
+            "6_market_filter": "F6_plus_market",
+        }
+        for stage_key, frame in funnel_frames.items():
+            frame.to_excel(
+                writer,
+                sheet_name=funnel_sheet_names.get(stage_key, stage_key[:31]),
+                index=False,
+            )
         pd.DataFrame([{
             "signal_date": result["signal_date"],
             "current_positions": result["current_positions"],
@@ -914,6 +994,7 @@ def save_daily_selection(result: dict, output_dir: str = "."):
     print(f"  selected buys:     {len(result['buy_list'])}")
     print(f"  Excel:             {xlsx}")
     print(f"  Buy list CSV:      {csv_buy}")
+    print(f"  Funnel CSV:        {csv_funnel}")
 
     if not result["buy_list"].empty:
         display_cols = [
@@ -925,7 +1006,7 @@ def save_daily_selection(result: dict, output_dir: str = "."):
     else:
         print("\nNo buy candidates for next open.")
 
-    return xlsx, csv_buy, csv_all
+    return xlsx, csv_buy, csv_all, csv_funnel
 
 
 if __name__ == "__main__":

@@ -75,6 +75,30 @@ Signal-date cumulative funnel:
 
 此項修改只增加診斷輸出與一致性檢查，不改變任何選股布林條件、候選股名單或 order intent。
 
+### 保存每一層通過的股票（2026-08-22）
+
+除了終端顯示各層數量，daily selector 現在也會保存每一層累積篩選後的股票代號。當某層剩餘不超過 20 檔時，終端會直接列出 `passing stocks`。
+
+每日 selector Excel 新增以下工作表：
+
+- `F1_stock_regime`：通過個股趨勢結構。
+- `F2_plus_BIAS`：再通過 BIAS 跌深。
+- `F3_plus_MACD`：再通過 MACD 柱狀體回升。
+- `F4_plus_foreign_buy`：再通過外資買超為正。
+- `F5_plus_foreign_3Dhigh`：再通過外資買超占量近 3 日新高；等同大盤濾網前候選股。
+- `F6_plus_market`：再通過大盤濾網；等同最終候選股。
+- `funnel_all`：以上各層合併的 long-format 紀錄。
+
+另新增：
+
+```text
+..._funnel_candidates.csv
+```
+
+每筆紀錄包含 `signal_date`、層級順序、層級名稱、股票代號、該層總檔數，以及當日 BIAS、MACD oscillator、MACD 變化、外資買超狀態、外資占量 3 日新高狀態、外資買超占量和收盤價。即使大盤濾網將最終訊號歸零，仍可由 `F5_plus_foreign_3Dhigh` 找到被擋掉的股票。
+
+此修改只增加研究與稽核紀錄，不改變實際選股規則、排序、持股排除、部位限制或 order intent。
+
 ## 三、持有 35 天出場
 
 ### 舊版
@@ -120,6 +144,7 @@ holding_trading_days >= 35
 - Notebook 通過 JSON 結構檢查。
 - 使用合成資料驗證：當 8/18 有收盤價但外資資料為空時，程式會正確退回外資資料完整的 8/17。
 - 使用合成布林條件驗證累積漏斗，各層數量依序由 5 → 3 → 2 → 1 → 1，且最後結果與 `signal_before_market`、`signal_close_day` 一致。
+- 驗證每層股票清單與累積布林遮罩完全一致，並可輸出六個 Excel 分層工作表與 long-format CSV。
 - 出場比較使用 `>= 35`，避免原本的 off-by-one 問題。
 
 目前工作環境未安裝完整的 FinLab／Fubon 執行相依套件，因此尚未在此環境完成即時市場與券商 API 的端到端測試。請在原本的 Anaconda／FubonAPI 環境執行 Notebook；v2 的逐層診斷輸出可用來確認最新一天是否真的沒有訊號。
