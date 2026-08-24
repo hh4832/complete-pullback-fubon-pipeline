@@ -185,3 +185,10 @@ exit_by_close_loss = unrealized_pct < -0.15
 - `run_complete_pullback_fubon_pipeline_v2.py`
 
 Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六個 v2 檔案必須放在同一個資料夾中執行。
+# 2026-08-24：GitHub Actions 富邦登入測試準備（v2.4.0）
+
+- 將 `run_complete_pullback_fubon_pipeline_v2.py` 的專案目錄改為程式檔所在目錄，不再寫死 Windows 絕對路徑。
+- 新增 `requirements-github.txt`，供 GitHub Actions 安裝一般 Python 相依套件。
+- 新增 `test_fubon_github_connection.py`，僅測試富邦登入，不下單、不執行完整 pipeline。
+- 新增 `.github/workflows/test-fubon-login.yml`，需由 GitHub Actions 手動觸發。
+- `.pfx` 不加入 Git；workflow 從 `FUBON_CERT_BASE64` Secret 暫時還原到 runner，工作結束後由臨時主機清除。

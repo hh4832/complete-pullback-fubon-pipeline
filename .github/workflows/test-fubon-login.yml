@@ -1,0 +1,55 @@
+name: Test Fubon login
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-github.txt
+
+      - name: Install official Fubon Neo Linux SDK
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "https://www.fbs.com.tw/TradeAPI_SDK/fubon_binary/fubon_neo-2.2.9-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.zip" \
+            --output "$RUNNER_TEMP/fubon-neo.zip"
+          unzip -q "$RUNNER_TEMP/fubon-neo.zip" -d "$RUNNER_TEMP/fubon-neo"
+          wheel_path="$(find "$RUNNER_TEMP/fubon-neo" -type f -name '*.whl' -print -quit)"
+          test -n "$wheel_path"
+          python -m pip install "$wheel_path"
+
+      - name: Restore certificate from encrypted secret
+        shell: bash
+        env:
+          FUBON_CERT_BASE64: ${{ secrets.FUBON_CERT_BASE64 }}
+        run: |
+          test -n "$FUBON_CERT_BASE64"
+          printf '%s' "$FUBON_CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/fubon-cert.pfx"
+          chmod 600 "$RUNNER_TEMP/fubon-cert.pfx"
+
+      - name: Test read-only Fubon login
+        env:
+          FUBON_USER_ID: ${{ secrets.FUBON_USER_ID }}
+          FUBON_PASSWORD: ${{ secrets.FUBON_PASSWORD }}
+          FUBON_CERT_PASSWORD: ${{ secrets.FUBON_CERT_PASSWORD }}
+          FUBON_CERT_PATH: ${{ runner.temp }}/fubon-cert.pfx
+        run: python test_fubon_github_connection.py

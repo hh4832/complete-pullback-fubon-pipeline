@@ -6,7 +6,8 @@ from complete_pullback_fubon_pipeline_v2 import CompletePipelineConfig, run_comp
 
 
 if __name__ == "__main__":
-    PROJECT_DIR = Path(r"C:\Users\hh483\Desktop\FubonAPI\integrated_stock_pipeline_v7")
+    # Use the folder containing this script on both Windows and GitHub Actions.
+    PROJECT_DIR = Path(__file__).resolve().parent
 
     broker_config = PipelineConfig(
         target_date=None,
