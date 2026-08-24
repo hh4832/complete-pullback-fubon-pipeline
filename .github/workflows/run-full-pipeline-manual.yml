@@ -1,0 +1,164 @@
+name: Run full pipeline manually
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: complete-pullback-fubon-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TZ: Asia/Taipei
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-github.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-github.txt
+
+      - name: Install official Fubon Neo Linux SDK
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "https://www.fbs.com.tw/TradeAPI_SDK/fubon_binary/fubon_neo-2.2.9-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.zip" \
+            --output "$RUNNER_TEMP/fubon-neo.zip"
+          unzip -q "$RUNNER_TEMP/fubon-neo.zip" -d "$RUNNER_TEMP/fubon-neo"
+          wheel_path="$(find "$RUNNER_TEMP/fubon-neo" -type f -name '*.whl' -print -quit)"
+          test -n "$wheel_path"
+          python -m pip install "$wheel_path"
+
+      - name: Install rclone
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip" \
+            --output "$RUNNER_TEMP/rclone.zip"
+          unzip -q "$RUNNER_TEMP/rclone.zip" -d "$RUNNER_TEMP/rclone"
+          mkdir -p "$RUNNER_TEMP/bin"
+          cp "$RUNNER_TEMP/rclone/rclone-v1.75.0-linux-amd64/rclone" "$RUNNER_TEMP/bin/rclone"
+          chmod 700 "$RUNNER_TEMP/bin/rclone"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Restore encrypted credentials
+        shell: bash
+        env:
+          FUBON_CERT_BASE64: ${{ secrets.FUBON_CERT_BASE64 }}
+          GOOGLE_SERVICE_ACCOUNT_BASE64: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_BASE64 }}
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+        run: |
+          test -n "$FUBON_CERT_BASE64"
+          test -n "$GOOGLE_SERVICE_ACCOUNT_BASE64"
+          test -n "$RCLONE_CONFIG_BASE64"
+          printf '%s' "$FUBON_CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/fubon-cert.pfx"
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_BASE64" | base64 --decode > service_account.json
+          printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$RUNNER_TEMP/rclone.conf"
+          chmod 600 "$RUNNER_TEMP/fubon-cert.pfx" service_account.json "$RUNNER_TEMP/rclone.conf"
+          echo "RUN_DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: Restore strategy state from Google Drive
+        shell: bash
+        run: |
+          mkdir -p strategy_ledger
+          rclone --config "$RUNNER_TEMP/rclone.conf" copy \
+            "gdrive:Complete_Pullback_Fubon_Pipeline/state/strategy_ledger" \
+            strategy_ledger
+          rclone --config "$RUNNER_TEMP/rclone.conf" copyto \
+            "gdrive:Complete_Pullback_Fubon_Pipeline/state/holdings_entry_conditions.csv" \
+            holdings_entry_conditions.csv
+          test -f holdings_entry_conditions.csv
+
+      - name: Run complete pipeline
+        id: pipeline
+        shell: bash
+        env:
+          FUBON_USER_ID: ${{ secrets.FUBON_USER_ID }}
+          FUBON_PASSWORD: ${{ secrets.FUBON_PASSWORD }}
+          FUBON_CERT_PASSWORD: ${{ secrets.FUBON_CERT_PASSWORD }}
+          FUBON_CERT_PATH: ${{ runner.temp }}/fubon-cert.pfx
+          FINLAB_API_TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
+        run: |
+          set +e
+          set -o pipefail
+          python run_complete_pullback_fubon_pipeline_v2.py 2>&1 | tee pipeline.log
+          pipeline_exit_code=${PIPESTATUS[0]}
+          echo "PIPELINE_EXIT_CODE=$pipeline_exit_code" >> "$GITHUB_ENV"
+          exit 0
+
+      - name: Back up strategy state to Google Drive
+        if: always()
+        shell: bash
+        run: |
+          if [ -d strategy_ledger ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copy \
+              strategy_ledger \
+              "gdrive:Complete_Pullback_Fubon_Pipeline/state/strategy_ledger"
+          fi
+          if [ -f holdings_entry_conditions.csv ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copyto \
+              holdings_entry_conditions.csv \
+              "gdrive:Complete_Pullback_Fubon_Pipeline/state/holdings_entry_conditions.csv"
+          fi
+
+      - name: Upload outputs to Google Drive
+        if: always()
+        shell: bash
+        run: |
+          if [ -d output_selector ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copy \
+              output_selector \
+              "gdrive:Complete_Pullback_Fubon_Pipeline/runs/$RUN_DATE/output_selector"
+          fi
+          if [ -d output_integrated_stock ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copy \
+              output_integrated_stock \
+              "gdrive:Complete_Pullback_Fubon_Pipeline/runs/$RUN_DATE/output_integrated_stock"
+          fi
+          if [ -f pipeline.log ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copyto \
+              pipeline.log \
+              "gdrive:Complete_Pullback_Fubon_Pipeline/runs/$RUN_DATE/pipeline.log"
+          fi
+
+      - name: Upload GitHub Artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: pipeline-${{ env.RUN_DATE }}-${{ github.run_id }}
+          path: |
+            output_selector/
+            output_integrated_stock/
+            pipeline.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Send result email
+        if: always()
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          PIPELINE_EXIT_CODE: ${{ env.PIPELINE_EXIT_CODE }}
+          RUN_DATE: ${{ env.RUN_DATE }}
+        run: python send_pipeline_email.py
+
+      - name: Mark workflow failed when pipeline failed
+        if: always()
+        shell: bash
+        run: test "${PIPELINE_EXIT_CODE:-1}" -eq 0

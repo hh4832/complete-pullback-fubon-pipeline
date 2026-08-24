@@ -210,3 +210,12 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - 新增 `.github/workflows/test-google-drive.yml`，手動驗證 GitHub runner 能使用個人 OAuth rclone 設定讀取指定測試檔。
 - rclone 設定由 `RCLONE_CONFIG_BASE64` GitHub Secret 暫時還原，不提交 OAuth Client Secret 或 refresh token。
 - 測試僅列出 `connection_test/rclone_test.txt`，不下載、上傳或刪除任何正式資料。
+
+# 2026-08-24：完整雲端流程手動驗證（v2.7.0）
+
+- 新增 `.github/workflows/run-full-pipeline-manual.yml`，目前只能手動啟動，尚未加入每日排程。
+- 執行前從 Google Drive 恢復 `strategy_ledger` 與 `holdings_entry_conditions.csv`，執行後再回存，維持跨日策略狀態。
+- 完整執行富邦盤後帳務、35 日與收盤虧損逾 15% 出場觀察、FinLab 選股、市場廣度與 order intent；程式仍不會自動送單。
+- 每次結果存入 Google Drive 的日期資料夾，並建立保留 30 天的 GitHub Artifact。
+- 新增 `send_pipeline_email.py`，透過 Gmail App Password 寄送成功或失敗狀態；附件只含 output 與 log，不含策略帳本或憑證。
+- 即使 pipeline 失敗，workflow 仍會盡量備份已存在的狀態、輸出、log 並寄送失敗通知，最後再將 workflow 標記為失敗。
