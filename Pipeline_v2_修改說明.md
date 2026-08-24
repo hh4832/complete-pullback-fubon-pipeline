@@ -120,6 +120,31 @@ holding_trading_days >= 35
 - Excel 工作表名稱由「持有超過60天」改為「持有達35天」。
 - 完整 pipeline 與單獨選股入口均強制使用相同的 Day-35 設定，避免從不同入口執行時套用不同參數。
 
+### 新增收盤虧損超過 15% 出場（2026-08-24）
+
+Pipeline 新增：
+
+```python
+close_loss_threshold = 0.15
+```
+
+判斷式使用持股平均成本與目標日／最新可得收盤價計算：
+
+```python
+unrealized_pct = current_close / avg_cost - 1
+exit_by_close_loss = unrealized_pct < -0.15
+```
+
+也就是「收盤虧損嚴格超過 15%」才觸發；剛好等於 -15.00% 不觸發。觸發後會：
+
+- 列入 `exit_signal` 與「出場觀察」。
+- `exit_reason` 顯示「收盤虧損>15%」。
+- 寫入 `exit_by_close_loss` 欄位。
+- 寫入 Excel 工作表 `收盤虧損逾15pct`。
+- 在 `出場觀察_log` 以 `close_loss` 規則記錄首次觸發。
+
+此條件以收盤價判斷，只產生出場觀察／紀錄，不會由程式自動送出賣單。它使 live pipeline 與原本回測的 -15% 停損設定一致。
+
 ## 四、維持不變的功能
 
 以下功能未改動：
@@ -146,6 +171,7 @@ holding_trading_days >= 35
 - 使用合成布林條件驗證累積漏斗，各層數量依序由 5 → 3 → 2 → 1 → 1，且最後結果與 `signal_before_market`、`signal_close_day` 一致。
 - 驗證每層股票清單與累積布林遮罩完全一致，並可輸出六個 Excel 分層工作表與 long-format CSV。
 - 出場比較使用 `>= 35`，避免原本的 off-by-one 問題。
+- 驗證收盤報酬 -15.01% 會觸發 close-loss，而 -15.00% 與 -14.99% 不會觸發。
 
 目前工作環境未安裝完整的 FinLab／Fubon 執行相依套件，因此尚未在此環境完成即時市場與券商 API 的端到端測試。請在原本的 Anaconda／FubonAPI 環境執行 Notebook；v2 的逐層診斷輸出可用來確認最新一天是否真的沒有訊號。
 

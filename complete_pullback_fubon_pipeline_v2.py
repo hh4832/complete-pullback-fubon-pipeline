@@ -191,6 +191,7 @@ def run_complete_daily_pipeline(
     config = config or CompletePipelineConfig()
     # Keep the live broker/exit watcher aligned with the validated Day-35 strategy.
     config.broker_config.min_holding_trading_days = 35
+    config.broker_config.close_loss_threshold = 0.15
     print("版本確認：complete_pullback_fubon_pipeline v1.0")
 
     broker_result = None

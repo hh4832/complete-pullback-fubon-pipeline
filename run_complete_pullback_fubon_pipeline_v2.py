@@ -25,6 +25,7 @@ if __name__ == "__main__":
         mfe_threshold=0.40,
         min_holding_trading_days=35,
         pullback_threshold=0.25,
+        close_loss_threshold=0.15,
         continue_on_market_error=True,
         continue_on_gsheet_error=True,
         continue_on_mfe_error=True,

@@ -110,9 +110,11 @@ class PipelineConfig:
     # 出場觀察條件
     # 條件 A：MFE > mfe_threshold 且浮盈回吐 > pullback_threshold（百分點）
     # 條件 B：持有交易日 >= min_holding_trading_days
+    # 條件 D：收盤未實現虧損 > close_loss_threshold
     mfe_threshold: float = 0.40
     min_holding_trading_days: int = 35
     pullback_threshold: float = 0.25
+    close_loss_threshold: float = 0.15
 
     # 策略帳本：將富邦實際庫存與策略歸屬分開管理
     enable_strategy_ledger: bool = True
@@ -967,10 +969,11 @@ def format_percent_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_mfe_alert(mfe: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     """
-    出場觀察條件，三種任一成立即列入：
+    出場觀察條件，四種任一成立即列入：
     A. MFE > mfe_threshold 且浮盈回吐 > pullback_threshold（百分點）
     B. 持有交易日 >= min_holding_trading_days
     C. MFE > 10% 且 giveback_of_mfe_pct > 100%，也就是曾經浮盈超過 10% 但已吐光轉虧
+    D. 以目前收盤價計算的未實現虧損 > close_loss_threshold
 
     注意：format_percent_columns() 會把 0.40 轉成 40.00，
     因此這裡用 config.* * 100 比較。
@@ -998,11 +1001,18 @@ def build_mfe_alert(mfe: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
         & formatted["giveback_of_mfe_pct"].gt(100)
     )
     exit_by_holding_days = formatted["holding_trading_days"].ge(config.min_holding_trading_days)
+    exit_by_close_loss = formatted["unrealized_pct"].lt(-config.close_loss_threshold * 100)
 
     formatted["exit_by_mfe_pullback"] = exit_by_mfe_pullback
     formatted["exit_by_mfe10_giveback100"] = exit_by_mfe10_giveback100
     formatted["exit_by_holding_days"] = exit_by_holding_days
-    formatted["exit_signal"] = exit_by_mfe_pullback | exit_by_mfe10_giveback100 | exit_by_holding_days
+    formatted["exit_by_close_loss"] = exit_by_close_loss
+    formatted["exit_signal"] = (
+        exit_by_mfe_pullback
+        | exit_by_mfe10_giveback100
+        | exit_by_holding_days
+        | exit_by_close_loss
+    )
 
     def reason(row: pd.Series) -> str:
         reasons = []
@@ -1014,6 +1024,8 @@ def build_mfe_alert(mfe: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
             reasons.append("MFE>10% 且最大浮盈已吐光轉虧")
         if bool(row.get("exit_by_holding_days", False)):
             reasons.append(f"持有>={config.min_holding_trading_days}個交易日")
+        if bool(row.get("exit_by_close_loss", False)):
+            reasons.append(f"收盤虧損>{int(config.close_loss_threshold * 100)}%")
         return "；".join(reasons)
 
     formatted["exit_reason"] = formatted.apply(reason, axis=1)
@@ -1021,12 +1033,13 @@ def build_mfe_alert(mfe: pd.DataFrame, config: PipelineConfig) -> pd.DataFrame:
     return formatted[formatted["exit_signal"]].copy().sort_values(
         [
             "exit_by_holding_days",
+            "exit_by_close_loss",
             "exit_by_mfe_pullback",
             "exit_by_mfe10_giveback100",
             "holding_trading_days",
             "profit_giveback_pct_point",
         ],
-        ascending=[False, False, False, False, False],
+        ascending=[False, False, False, False, False, False],
     ).reset_index(drop=True)
 
 
@@ -1081,6 +1094,7 @@ def update_exit_review_log(
             ("mfe_pullback", "exit_by_mfe_pullback"),
             ("mfe10_giveback100", "exit_by_mfe10_giveback100"),
             ("holding_days", "exit_by_holding_days"),
+            ("close_loss", "exit_by_close_loss"),
         ]
 
         for rule_name, flag_col in rules:
@@ -1570,6 +1584,10 @@ def export_results(
         else:
             pd.DataFrame().to_excel(writer, sheet_name="MFE回檔出場", index=False)
             pd.DataFrame().to_excel(writer, sheet_name="持有達35天", index=False)
+        if not alert.empty and "exit_by_close_loss" in alert.columns:
+            alert[alert["exit_by_close_loss"]].to_excel(writer, sheet_name="收盤虧損逾15pct", index=False)
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name="收盤虧損逾15pct", index=False)
         # 相容舊版命名，也保留 MFE_警示，內容等同出場觀察
         alert.to_excel(writer, sheet_name="MFE_警示", index=False)
         if strategy_ledger:
@@ -1740,10 +1758,11 @@ def run_pipeline(config: Optional[PipelineConfig] = None) -> dict[str, Any]:
 
         print("\n=== 出場觀察 ===")
         print(
-            "條件 A：MFE > {}% 且浮盈回吐 > {} 個百分點；條件 B：持有 >= {} 個交易日；任一成立即列入。".format(
+            "條件 A：MFE > {}% 且浮盈回吐 > {} 個百分點；條件 B：持有 >= {} 個交易日；條件 C：MFE > 10% 且吐光轉虧；條件 D：收盤虧損 > {}%；任一成立即列入。".format(
                 int(config.mfe_threshold * 100),
                 int(config.pullback_threshold * 100),
                 config.min_holding_trading_days,
+                int(config.close_loss_threshold * 100),
             )
         )
         if alert.empty:
