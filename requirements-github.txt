@@ -1,5 +1,5 @@
 beautifulsoup4
-finlab==2.0.11
+finlab==2.0.18
 gspread
 google-auth
 numpy

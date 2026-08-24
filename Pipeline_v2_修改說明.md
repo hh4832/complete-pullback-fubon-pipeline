@@ -199,3 +199,8 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - 新增 `test_cloud_integrations.py`，依序測試富邦庫存、FinLab 收盤價與既有市場廣度 Google Sheet。
 - 新增 `.github/workflows/test-cloud-integrations.yml`，僅能手動觸發。
 - 此測試只讀取資料，不寫入 Google Sheet、不建立 order intent、不修改正式策略帳本，也不下單。
+
+## v2.5.1 修正
+
+- 將正式 pipeline、預設設定與 GitHub 整合測試的 Google Spreadsheet ID 統一為目前使用中的市場廣度試算表。
+- 依 FinLab 執行提示，將 GitHub 環境版本由 `2.0.11` 更新為 `2.0.18`。

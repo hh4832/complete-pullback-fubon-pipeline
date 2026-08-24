@@ -83,7 +83,7 @@ class PipelineConfig:
 
     # Google Sheet
     google_credentials_file: Path = Path("service_account.json")
-    spreadsheet_id: str = "1Re645rLgNH9_PDLYr57_QmuvQdu3y_soLbmFYIpqSmk"
+    spreadsheet_id: str = "1-bs4-2mYutvQcUYY-np5zp-QqEJfab--TAjmfQi8RQY"
     sheet_name: str = "市場廣度"
     enable_google_sheet: bool = True
 

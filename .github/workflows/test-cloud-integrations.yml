@@ -58,6 +58,6 @@ jobs:
           FUBON_CERT_PATH: ${{ runner.temp }}/fubon-cert.pfx
           FINLAB_API_TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/service-account.json
-          GOOGLE_SPREADSHEET_ID: 1Re645rLgNH9_PDLYr57_QmuvQdu3y_soLbmFYIpqSmk
+          GOOGLE_SPREADSHEET_ID: 1-bs4-2mYutvQcUYY-np5zp-QqEJfab--TAjmfQi8RQY
           GOOGLE_WORKSHEET_NAME: 市場廣度
         run: python test_cloud_integrations.py

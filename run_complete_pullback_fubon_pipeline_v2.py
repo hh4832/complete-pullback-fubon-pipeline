@@ -12,7 +12,7 @@ if __name__ == "__main__":
     broker_config = PipelineConfig(
         target_date=None,
         google_credentials_file=Path("service_account.json"),
-        spreadsheet_id="1Re645rLgNH9_PDLYr57_QmuvQdu3y_soLbmFYIpqSmk",
+        spreadsheet_id="1-bs4-2mYutvQcUYY-np5zp-QqEJfab--TAjmfQi8RQY",
         sheet_name="市場廣度",
         enable_google_sheet=True,
         entry_condition_file=Path("holdings_entry_conditions.csv"),
