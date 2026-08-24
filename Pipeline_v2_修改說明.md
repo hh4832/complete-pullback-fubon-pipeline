@@ -204,3 +204,9 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 
 - 將正式 pipeline、預設設定與 GitHub 整合測試的 Google Spreadsheet ID 統一為目前使用中的市場廣度試算表。
 - 依 FinLab 執行提示，將 GitHub 環境版本由 `2.0.11` 更新為 `2.0.18`。
+
+# 2026-08-24：Google Drive OAuth 雲端測試（v2.6.0）
+
+- 新增 `.github/workflows/test-google-drive.yml`，手動驗證 GitHub runner 能使用個人 OAuth rclone 設定讀取指定測試檔。
+- rclone 設定由 `RCLONE_CONFIG_BASE64` GitHub Secret 暫時還原，不提交 OAuth Client Secret 或 refresh token。
+- 測試僅列出 `connection_test/rclone_test.txt`，不下載、上傳或刪除任何正式資料。

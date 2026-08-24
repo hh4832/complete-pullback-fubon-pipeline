@@ -1,0 +1,43 @@
+name: Test Google Drive backup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-drive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Install rclone
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip" \
+            --output "$RUNNER_TEMP/rclone.zip"
+          unzip -q "$RUNNER_TEMP/rclone.zip" -d "$RUNNER_TEMP/rclone"
+          mkdir -p "$RUNNER_TEMP/bin"
+          cp "$RUNNER_TEMP/rclone/rclone-v1.75.0-linux-amd64/rclone" "$RUNNER_TEMP/bin/rclone"
+          chmod 700 "$RUNNER_TEMP/bin/rclone"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Restore encrypted rclone config
+        shell: bash
+        env:
+          RCLONE_CONFIG_BASE64: ${{ secrets.RCLONE_CONFIG_BASE64 }}
+        run: |
+          test -n "$RCLONE_CONFIG_BASE64"
+          printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$RUNNER_TEMP/rclone.conf"
+          chmod 600 "$RUNNER_TEMP/rclone.conf"
+
+      - name: Verify Google Drive test file
+        shell: bash
+        run: |
+          rclone --config "$RUNNER_TEMP/rclone.conf" \
+            lsf "gdrive:Complete_Pullback_Fubon_Pipeline/connection_test" \
+            > "$RUNNER_TEMP/drive-files.txt"
+          grep -Fxq "rclone_test.txt" "$RUNNER_TEMP/drive-files.txt"
+          echo "Google Drive read succeeded: rclone_test.txt found"
