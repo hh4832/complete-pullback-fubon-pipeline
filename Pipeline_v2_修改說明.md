@@ -192,3 +192,10 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - 新增 `test_fubon_github_connection.py`，僅測試富邦登入，不下單、不執行完整 pipeline。
 - 新增 `.github/workflows/test-fubon-login.yml`，需由 GitHub Actions 手動觸發。
 - `.pfx` 不加入 Git；workflow 從 `FUBON_CERT_BASE64` Secret 暫時還原到 runner，工作結束後由臨時主機清除。
+
+# 2026-08-24：雲端整合唯讀測試（v2.5.0）
+
+- `requirements-github.txt` 加入固定版本 `finlab==2.0.11`。
+- 新增 `test_cloud_integrations.py`，依序測試富邦庫存、FinLab 收盤價與既有市場廣度 Google Sheet。
+- 新增 `.github/workflows/test-cloud-integrations.yml`，僅能手動觸發。
+- 此測試只讀取資料，不寫入 Google Sheet、不建立 order intent、不修改正式策略帳本，也不下單。
