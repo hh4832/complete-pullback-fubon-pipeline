@@ -219,3 +219,12 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - 每次結果存入 Google Drive 的日期資料夾，並建立保留 30 天的 GitHub Artifact。
 - 新增 `send_pipeline_email.py`，透過 Gmail App Password 寄送成功或失敗狀態；附件只含 output 與 log，不含策略帳本或憑證。
 - 即使 pipeline 失敗，workflow 仍會盡量備份已存在的狀態、輸出、log 並寄送失敗通知，最後再將 workflow 標記為失敗。
+
+# 2026-08-24：啟用每日自動排程（v2.8.0）
+
+- 將已通過手動驗證的完整 workflow 命名為 `Run full pipeline daily`。
+- 保留 `workflow_dispatch` 手動執行，並新增 `Asia/Taipei` 時區排程：週一至週五 19:00。
+- 沿用同一個 concurrency group；若前一次仍在執行，下一次會等待，不會同時修改策略帳本。
+- GitHub 排程可能因平台負載晚數分鐘啟動；不會提早於台灣時間 19:00。
+- 將 `actions/upload-artifact` 更新為支援 Node.js 24 的 v6，移除 v5 的淘汰警告。
+- 台灣國定休市日若落在週一至週五，GitHub 仍會啟動；既有 trade ID 與 Google Sheet 日期更新邏輯具冪等性，不會因同一訊號日重跑而新增重複 intent。

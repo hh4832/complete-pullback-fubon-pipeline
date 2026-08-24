@@ -1,7 +1,10 @@
-name: Run full pipeline manually
+name: Run full pipeline daily
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 19 * * 1-5"
+      timezone: "Asia/Taipei"
 
 permissions:
   contents: read
@@ -138,7 +141,7 @@ jobs:
 
       - name: Upload GitHub Artifact
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: pipeline-${{ env.RUN_DATE }}-${{ github.run_id }}
           path: |
