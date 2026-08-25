@@ -42,13 +42,11 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import date, datetime, timedelta
-from io import StringIO
 from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from tqdm import tqdm
 
@@ -489,19 +487,39 @@ def add_limit_prices(df: pd.DataFrame, prev_close_col: str = "前收") -> pd.Dat
 
 
 def fetch_common_stock_set(mode: int) -> set[str]:
+    """Return listed/OTC company tickers from official JSON OpenAPI.
+
+    The former ISIN HTML page is not reliable from GitHub-hosted runners and
+    its markup can change.  Company-profile OpenAPI datasets naturally exclude
+    ETFs, warrants and other exchange-traded products, which is the universe
+    needed for the ordinary-stock breadth calculation.
+    """
+    sources = {
+        2: ("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "公司代號"),
+        4: ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", "SecuritiesCompanyCode"),
+    }
+    if mode not in sources:
+        raise ValueError(f"不支援的普通股清單 mode：{mode}")
+
     time.sleep(1)
-    url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
+    url, code_field = sources[mode]
     r = requests.get(url, timeout=30, headers=HEADERS)
-    r.encoding = "big5"
-    soup = BeautifulSoup(r.text, "html.parser")
-    table = soup.find("table", {"class": "h4"})
-    if table is None:
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, list):
+        raise RuntimeError(f"普通股清單格式異常：mode={mode}")
+
+    tickers = {
+        normalize_stock_no(row.get(code_field))
+        for row in data
+        if isinstance(row, dict) and row.get(code_field) is not None
+    }
+    # Taiwanese ordinary company tickers are four numeric digits.  This also
+    # protects the breadth universe if an OpenAPI response later adds metadata.
+    tickers = {ticker for ticker in tickers if re.fullmatch(r"\d{4}", ticker)}
+    if not tickers:
         raise RuntimeError(f"普通股清單抓取失敗：mode={mode}")
-    df = pd.read_html(StringIO(str(table)))[0]
-    df.columns = ["代號名稱", "ISIN", "上市日", "市場別", "產業別", "CFICode", "備註"]
-    df = df[df["CFICode"].eq("ESVUFR")].copy()
-    df["ticker"] = df["代號名稱"].str.extract(r"^(\d+)")
-    return set(df["ticker"].dropna())
+    return tickers
 
 
 def fetch_twse(date_str: str) -> dict[str, Any]:

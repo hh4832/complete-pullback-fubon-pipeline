@@ -234,4 +234,12 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - `requirements-github.txt` 新增 `lxml>=5.3,<7`，讓 `pandas.read_html()` 能解析 TWSE/TPEX 市場廣度網頁。
 - 修正 GitHub 執行時出現 `Import lxml failed`，但 pipeline 因 optional-step 設定而繼續、造成當日 Google Sheet 無市場廣度紀錄的問題。
 - 正式 runner 將 `continue_on_market_error` 與 `continue_on_gsheet_error` 改為 `False`；未來市場廣度取得或 Google Sheet 寫入失敗時，workflow 會變紅並寄出 FAILED Email，不再顯示假成功。
+
+## v2.8.2：改用官方 JSON 普通股清單
+
+- 修正 GitHub Linux runner 抓取舊 ISIN HTML 網頁時，找不到 `table.h4` 而出現「普通股清單抓取失敗：mode=2」的問題。
+- 上市公司清單改用 TWSE 官方 OpenAPI `t187ap03_L`。
+- 上櫃公司清單改用 TPEx 官方 OpenAPI `mopsfin_t187ap03_O`。
+- 新來源為 JSON，不再依賴 HTML class、Big5 編碼或 `pandas.read_html()`，並僅保留 4 碼數字公司股票代號。
+- 保留 fail-fast：若官方清單為空或格式異常，Action 會變紅並寄出 FAILED Email，不寫入不完整市場廣度。
 - 修正後可手動重跑同一日期；Google Sheet 會依日期更新，同一 signal date 的 order intent 仍以 deterministic trade ID 去重。
