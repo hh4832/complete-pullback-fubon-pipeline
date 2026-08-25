@@ -2,6 +2,7 @@ beautifulsoup4
 finlab==2.0.18
 gspread
 google-auth
+lxml>=5.3,<7
 numpy
 openpyxl
 pandas

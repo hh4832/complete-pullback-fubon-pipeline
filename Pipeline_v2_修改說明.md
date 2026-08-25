@@ -228,3 +228,10 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - GitHub 排程可能因平台負載晚數分鐘啟動；不會提早於台灣時間 19:00。
 - 將 `actions/upload-artifact` 更新為支援 Node.js 24 的 v6，移除 v5 的淘汰警告。
 - 台灣國定休市日若落在週一至週五，GitHub 仍會啟動；既有 trade ID 與 Google Sheet 日期更新邏輯具冪等性，不會因同一訊號日重跑而新增重複 intent。
+
+## v2.8.1：修正雲端市場廣度缺漏
+
+- `requirements-github.txt` 新增 `lxml>=5.3,<7`，讓 `pandas.read_html()` 能解析 TWSE/TPEX 市場廣度網頁。
+- 修正 GitHub 執行時出現 `Import lxml failed`，但 pipeline 因 optional-step 設定而繼續、造成當日 Google Sheet 無市場廣度紀錄的問題。
+- 正式 runner 將 `continue_on_market_error` 與 `continue_on_gsheet_error` 改為 `False`；未來市場廣度取得或 Google Sheet 寫入失敗時，workflow 會變紅並寄出 FAILED Email，不再顯示假成功。
+- 修正後可手動重跑同一日期；Google Sheet 會依日期更新，同一 signal date 的 order intent 仍以 deterministic trade ID 去重。

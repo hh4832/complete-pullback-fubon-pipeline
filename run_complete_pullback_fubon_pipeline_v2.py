@@ -27,8 +27,10 @@ if __name__ == "__main__":
         min_holding_trading_days=35,
         pullback_threshold=0.25,
         close_loss_threshold=0.15,
-        continue_on_market_error=True,
-        continue_on_gsheet_error=True,
+        # These two records are required in production. Fail the workflow and
+        # send a FAILED email instead of silently producing an incomplete day.
+        continue_on_market_error=False,
+        continue_on_gsheet_error=False,
         continue_on_mfe_error=True,
         debug=True,
     )
