@@ -243,3 +243,8 @@ Python 檔案彼此的 `import` 已同步改成 `_v2` 模組名稱，因此六�
 - 新來源為 JSON，不再依賴 HTML class、Big5 編碼或 `pandas.read_html()`，並僅保留 4 碼數字公司股票代號。
 - 保留 fail-fast：若官方清單為空或格式異常，Action 會變紅並寄出 FAILED Email，不寫入不完整市場廣度。
 - 修正後可手動重跑同一日期；Google Sheet 會依日期更新，同一 signal date 的 order intent 仍以 deterministic trade ID 去重。
+
+## v2.8.3：補上股票代號驗證所需模組
+
+- 補上 `import re`，修正 v2.8.2 執行 4 碼股票代號驗證時的 `NameError: name 're' is not defined`。
+- 除了 Python 語法編譯檢查，另以模擬 TWSE/TPEx JSON 回應實際執行 `fetch_common_stock_set(2)` 與 `fetch_common_stock_set(4)`，確認兩種代號欄位都能正常解析。
