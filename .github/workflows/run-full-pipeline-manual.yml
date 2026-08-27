@@ -3,7 +3,8 @@ name: Run full pipeline daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 19 * * 1-5"
+    # Run at 19:07 Asia/Taipei to avoid top-of-hour scheduling congestion.
+    - cron: "7 19 * * 1-5"
       timezone: "Asia/Taipei"
 
 permissions:
