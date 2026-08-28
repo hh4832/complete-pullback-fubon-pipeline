@@ -3,12 +3,18 @@ name: Run full pipeline daily
 on:
   workflow_dispatch:
   schedule:
-    # Run at 19:07 Asia/Taipei to avoid top-of-hour scheduling congestion.
+    # Triple-trigger fallback at 19:07 / 19:27 / 19:47 Asia/Taipei.
+    # If an earlier scheduled run already succeeded today, later triggers skip the pipeline.
     - cron: "7 19 * * 1-5"
+      timezone: "Asia/Taipei"
+    - cron: "27 19 * * 1-5"
+      timezone: "Asia/Taipei"
+    - cron: "47 19 * * 1-5"
       timezone: "Asia/Taipei"
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: complete-pullback-fubon-pipeline
@@ -22,10 +28,56 @@ jobs:
       TZ: Asia/Taipei
 
     steps:
+      - name: Check whether today's scheduled run already succeeded
+        id: daily_guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Manual runs should always execute.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run: bypass daily guard."
+            exit 0
+          fi
+
+          TODAY_TAIPEI="$(TZ=Asia/Taipei date +%F)"
+          CURRENT_RUN_ID="${GITHUB_RUN_ID}"
+
+          WORKFLOW_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CURRENT_RUN_ID}"               --jq '.workflow_id'
+          )"
+
+          PRIOR_SUCCESS="$(
+            gh api               -H "Accept: application/vnd.github+json"               "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?event=schedule&status=success&per_page=100"               --jq '.workflow_runs[] | [.id, .created_at] | @tsv' |
+            while IFS=$'\t' read -r RUN_ID CREATED_AT; do
+              [ "$RUN_ID" = "$CURRENT_RUN_ID" ] && continue
+
+              RUN_DATE_TAIPEI="$(
+                TZ=Asia/Taipei date -d "$CREATED_AT" +%F
+              )"
+
+              if [ "$RUN_DATE_TAIPEI" = "$TODAY_TAIPEI" ]; then
+                echo "$RUN_ID"
+                break
+              fi
+            done
+          )"
+
+          if [ -n "$PRIOR_SUCCESS" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "A scheduled run already succeeded today (run_id=${PRIOR_SUCCESS}). Skip duplicate execution."
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "No successful scheduled run found for today. Continue."
+          fi
+
       - name: Check out repository
+        if: steps.daily_guard.outputs.should_run == 'true'
         uses: actions/checkout@v6
 
       - name: Set up Python
+        if: steps.daily_guard.outputs.should_run == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -33,11 +85,13 @@ jobs:
           cache-dependency-path: requirements-github.txt
 
       - name: Install Python dependencies
+        if: steps.daily_guard.outputs.should_run == 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-github.txt
 
       - name: Install official Fubon Neo Linux SDK
+        if: steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           curl --fail --location --retry 3 \
@@ -49,6 +103,7 @@ jobs:
           python -m pip install "$wheel_path"
 
       - name: Install rclone
+        if: steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           curl --fail --location --retry 3 \
@@ -61,6 +116,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Restore encrypted credentials
+        if: steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         env:
           FUBON_CERT_BASE64: ${{ secrets.FUBON_CERT_BASE64 }}
@@ -77,6 +133,7 @@ jobs:
           echo "RUN_DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
 
       - name: Restore strategy state from Google Drive
+        if: steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           mkdir -p strategy_ledger
@@ -89,6 +146,7 @@ jobs:
           test -f holdings_entry_conditions.csv
 
       - name: Run complete pipeline
+        if: steps.daily_guard.outputs.should_run == 'true'
         id: pipeline
         shell: bash
         env:
@@ -106,7 +164,7 @@ jobs:
           exit 0
 
       - name: Back up strategy state to Google Drive
-        if: always()
+        if: always() && steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           if [ -d strategy_ledger ]; then
@@ -121,7 +179,7 @@ jobs:
           fi
 
       - name: Upload outputs to Google Drive
-        if: always()
+        if: always() && steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           if [ -d output_selector ]; then
@@ -141,7 +199,7 @@ jobs:
           fi
 
       - name: Upload GitHub Artifact
-        if: always()
+        if: always() && steps.daily_guard.outputs.should_run == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: pipeline-${{ env.RUN_DATE }}-${{ github.run_id }}
@@ -153,7 +211,7 @@ jobs:
           retention-days: 30
 
       - name: Send result email
-        if: always()
+        if: always() && steps.daily_guard.outputs.should_run == 'true'
         env:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
@@ -163,6 +221,6 @@ jobs:
         run: python send_pipeline_email.py
 
       - name: Mark workflow failed when pipeline failed
-        if: always()
+        if: always() && steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: test "${PIPELINE_EXIT_CODE:-1}" -eq 0
