@@ -3,14 +3,13 @@ name: Run full pipeline daily
 on:
   workflow_dispatch:
   schedule:
-    # Triple-trigger fallback at 19:07 / 19:27 / 19:47 Asia/Taipei.
+    # Triple-trigger fallback using UTC cron.
+    # 11:07 / 11:27 / 11:47 UTC = 19:07 / 19:27 / 19:47 Asia/Taipei.
+    # Taiwan has no daylight saving time.
     # If an earlier scheduled run already succeeded today, later triggers skip the pipeline.
-    - cron: "7 19 * * 1-5"
-      timezone: "Asia/Taipei"
-    - cron: "27 19 * * 1-5"
-      timezone: "Asia/Taipei"
-    - cron: "47 19 * * 1-5"
-      timezone: "Asia/Taipei"
+    - cron: "7 11 * * 1-5"
+    - cron: "27 11 * * 1-5"
+    - cron: "47 11 * * 1-5"
 
 permissions:
   contents: read
