@@ -34,12 +34,17 @@ INDEX_SYMBOLS = ("TAIEX", "OTC")
 class AsOfDateResolution:
     requested_date: Optional[pd.Timestamp]
     effective_date: pd.Timestamp
+    latest_complete_date: pd.Timestamp
     foreign_dataset: str
     latest_by_source: dict[str, str]
 
     @property
     def effective_date_str(self) -> str:
         return self.effective_date.strftime("%Y-%m-%d")
+
+    @property
+    def latest_complete_date_str(self) -> str:
+        return self.latest_complete_date.strftime("%Y-%m-%d")
 
 
 def _normalize_date(value: str | pd.Timestamp) -> pd.Timestamp:
@@ -100,15 +105,15 @@ def resolve_finlab_as_of_date(
     if len(complete_dates) == 0:
         raise RuntimeError("必要 FinLab datasets 找不到共同完整交易日。")
 
+    latest_complete = pd.Timestamp(complete_dates[-1]).normalize()
     requested = _normalize_date(requested_date) if requested_date is not None else None
     if requested is None:
-        effective = pd.Timestamp(complete_dates[-1]).normalize()
+        effective = latest_complete
     else:
         if requested not in complete_dates:
-            latest = pd.Timestamp(complete_dates[-1]).date()
             raise ValueError(
                 f"指定 as_of_date {requested.date()} 不是 FinLab 完整共同交易日；"
-                f"目前最新完整共同交易日為 {latest}。不自動回退日期。"
+                f"目前最新完整共同交易日為 {latest_complete.date()}。不自動回退日期。"
             )
         effective = requested
 
@@ -128,6 +133,7 @@ def resolve_finlab_as_of_date(
     return AsOfDateResolution(
         requested_date=requested,
         effective_date=effective,
+        latest_complete_date=latest_complete,
         foreign_dataset=foreign_field,
         latest_by_source=latest_by_source,
     )
