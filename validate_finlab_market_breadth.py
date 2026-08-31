@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import pandas as pd
+from finlab import data
 
 import integrated_stock_pipeline_exitlog_fixed_strategy_ledger_v2 as legacy
 from finlab_market_breadth import (
     add_limit_prices_legacy_compatible,
     calc_breadth,
     load_finlab_market_breadth_data,
+    ordinary_stock_symbols,
 )
 
 
@@ -35,6 +37,70 @@ def classify_rows(df: pd.DataFrame, *, new_schema: bool) -> pd.Series:
     return labels
 
 
+def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
+    """Explain why legacy and FinLab universes differ for the target date."""
+    d = result.target_date
+    old_symbols = set(old_df.index.astype(str))
+    new_symbols = set(result.stock_df.index.astype(str))
+    symbols = sorted(old_symbols ^ new_symbols)
+
+    raw_close = data.get("price:收盤價")
+    raw_volume = data.get("price:成交股數")
+    cats = result.security_categories.copy()
+    ordinary = set(ordinary_stock_symbols(cats).astype(str))
+
+    cat_lookup = (
+        cats.drop_duplicates(subset=["stock_id"], keep="last")
+        .set_index("stock_id")
+    )
+
+    rows = []
+    for s in symbols:
+        cat = cat_lookup.loc[s] if s in cat_lookup.index else None
+        close = raw_close.loc[d, s] if d in raw_close.index and s in raw_close.columns else pd.NA
+        volume = raw_volume.loc[d, s] if d in raw_volume.index and s in raw_volume.columns else pd.NA
+        category = cat.get("category", "") if cat is not None else ""
+        market = cat.get("market", "") if cat is not None else ""
+        name = cat.get("name", "") if cat is not None and "name" in cat.index else ""
+
+        reasons = []
+        if s not in ordinary:
+            if market not in {"sii", "otc"}:
+                reasons.append(f"market={market or 'missing'}")
+            if not pd.Series([s]).str.fullmatch(r"\d{4}", na=False).iloc[0]:
+                reasons.append("not_4_digit")
+            if "存託憑證" in str(category):
+                reasons.append("depositary_receipt")
+            if not reasons:
+                reasons.append("excluded_by_ordinary_rule")
+        else:
+            reasons.append("passes_finlab_ordinary_rule")
+
+        try:
+            vol_num = float(volume)
+        except Exception:
+            vol_num = float("nan")
+        if pd.isna(close):
+            reasons.append("close_missing")
+        if pd.isna(vol_num) or vol_num <= 0:
+            reasons.append("not_traded_or_volume_missing")
+
+        rows.append({
+            "stock_id": s,
+            "name": name,
+            "category": category,
+            "market": market,
+            "legacy_in": s in old_symbols,
+            "finlab_in": s in new_symbols,
+            "finlab_ordinary_rule": s in ordinary,
+            "close": close,
+            "volume": volume,
+            "diagnosis": ";".join(reasons),
+        })
+
+    return pd.DataFrame(rows).set_index("stock_id") if rows else pd.DataFrame()
+
+
 def print_legacy_comparison(result, stats) -> None:
     target = result.target_date.date()
     print("\n=== Legacy TWSE/TPEX comparison ===")
@@ -56,6 +122,10 @@ def print_legacy_comparison(result, stats) -> None:
     print("\nUniverse difference:")
     print(f"  legacy only ({len(old_symbols - new_symbols)}): {sorted(old_symbols - new_symbols)}")
     print(f"  FinLab only ({len(new_symbols - old_symbols)}): {sorted(new_symbols - old_symbols)}")
+
+    universe_diag = build_universe_diagnostic(result, old_df)
+    print("\nUniverse difference diagnostics:")
+    print(universe_diag.to_string() if not universe_diag.empty else "  none")
 
     common = sorted(old_symbols & new_symbols)
     old_labels = classify_rows(old_df.loc[common], new_schema=False)
