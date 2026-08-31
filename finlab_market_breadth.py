@@ -143,38 +143,27 @@ def load_finlab_market_breadth_data(target_date: str | pd.Timestamp) -> BreadthD
     )
 
 
-def add_limit_prices_legacy_compatible(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate Taiwan +/-10% daily limit prices with exchange tick rounding.
+def get_tick_size_series(reference: pd.Series) -> pd.Series:
+    """Match the existing production tick-size rule exactly.
 
-    This follows the same intent as the existing production helper and is kept
-    local for validation. Production replacement should reuse one canonical
-    implementation after A/B validation passes.
+    Important: the tick bucket is determined from the day's reference price,
+    not from the calculated +/-10% limit price.  Using the limit price itself
+    misclassifies names that cross a tick boundary (e.g. 500 or 1000).
     """
+    return pd.cut(
+        reference,
+        bins=[0, 10, 50, 100, 500, 1000, float("inf")],
+        labels=[0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+    ).astype(float)
+
+
+def add_limit_prices_legacy_compatible(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate Taiwan +/-10% limit prices using the production rule."""
     out = df.copy()
-
-    def tick_size(price: float) -> float:
-        if price < 10:
-            return 0.01
-        if price < 50:
-            return 0.05
-        if price < 100:
-            return 0.1
-        if price < 500:
-            return 0.5
-        if price < 1000:
-            return 1.0
-        return 5.0
-
-    def floor_tick(value: float) -> float:
-        tick = tick_size(value)
-        return np.floor((value + 1e-12) / tick) * tick
-
-    def ceil_tick(value: float) -> float:
-        tick = tick_size(value)
-        return np.ceil((value - 1e-12) / tick) * tick
-
-    out["漲停價"] = out["參考價"].map(lambda p: floor_tick(float(p) * 1.10))
-    out["跌停價"] = out["參考價"].map(lambda p: ceil_tick(float(p) * 0.90))
+    reference = out["參考價"]
+    tick = get_tick_size_series(reference)
+    out["漲停價"] = (np.floor(reference * 1.1 / tick) * tick).round(2)
+    out["跌停價"] = (np.ceil(reference * 0.9 / tick) * tick).round(2)
     return out
 
 
@@ -190,8 +179,8 @@ def calc_breadth(stock_df: pd.DataFrame) -> dict[str, int]:
     nonflat = base[base["漲跌幅"].ne(0)].copy()
     chg = nonflat["漲跌幅"]
     close = nonflat["收盤價"]
-    is_limit_up = close.ge(nonflat["漲停價"] - 1e-12)
-    is_limit_down = close.le(nonflat["跌停價"] + 1e-12)
+    is_limit_up = close.ge(nonflat["漲停價"])
+    is_limit_down = close.le(nonflat["跌停價"])
 
     stats = {
         "漲停": int(is_limit_up.sum()),
