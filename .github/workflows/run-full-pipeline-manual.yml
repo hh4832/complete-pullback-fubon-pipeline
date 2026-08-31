@@ -2,14 +2,6 @@ name: Run full pipeline daily
 
 on:
   workflow_dispatch:
-  schedule:
-    # Triple-trigger fallback using UTC cron.
-    # 11:07 / 11:27 / 11:47 UTC = 19:07 / 19:27 / 19:47 Asia/Taipei.
-    # Taiwan has no daylight saving time.
-    # If an earlier scheduled run already succeeded today, later triggers skip the pipeline.
-    - cron: "7 11 * * 1-5"
-    - cron: "27 11 * * 1-5"
-    - cron: "47 11 * * 1-5"
 
 permissions:
   contents: read
@@ -44,11 +36,11 @@ jobs:
           CURRENT_RUN_ID="${GITHUB_RUN_ID}"
 
           WORKFLOW_ID="$(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CURRENT_RUN_ID}"               --jq '.workflow_id'
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CURRENT_RUN_ID}" --jq '.workflow_id'
           )"
 
           PRIOR_SUCCESS="$(
-            gh api               -H "Accept: application/vnd.github+json"               "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?event=schedule&status=success&per_page=100"               --jq '.workflow_runs[] | [.id, .created_at] | @tsv' |
+            gh api -H "Accept: application/vnd.github+json" "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?event=schedule&status=success&per_page=100" --jq '.workflow_runs[] | [.id, .created_at] | @tsv' |
             while IFS=$'\t' read -r RUN_ID CREATED_AT; do
               [ "$RUN_ID" = "$CURRENT_RUN_ID" ] && continue
 
