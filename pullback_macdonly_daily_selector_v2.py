@@ -217,74 +217,75 @@ def calc_rsv(close, n):
 
     rsv = (close - rolling_low) / (rolling_high - rolling_low) * 100
     rsv = rsv.replace([np.inf, -np.inf], np.nan)
-
     return rsv
 
 
 def calc_k_from_rsv(rsv, alpha=1 / 3):
-    return rsv.ewm(alpha=alpha, adjust=False).mean()
+    k = rsv.ewm(alpha=alpha, adjust=False).mean()
+    return k
 
 
-def calc_macd_osc(close, fast=12, slow=26, signal=9):
-    """
-    MACD oscillator = EMA(fast) - EMA(slow) - signal line.
-    回傳 macd_line, macd_signal, macd_osc。
-    """
-    ema_fast = close.ewm(span=fast, adjust=False, min_periods=fast).mean()
-    ema_slow = close.ewm(span=slow, adjust=False, min_periods=slow).mean()
-    macd_line = ema_fast - ema_slow
-    macd_signal = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
-    macd_osc = macd_line - macd_signal
-    return macd_line, macd_signal, macd_osc
+def calc_adx_di(high, low, close, n=14):
+    high_prev = high.shift(1)
+    low_prev = low.shift(1)
+    close_prev = close.shift(1)
 
+    plus_dm = (high - high_prev).where((high - high_prev) > (low_prev - low), 0.0)
+    minus_dm = (low_prev - low).where((low_prev - low) > (high - high_prev), 0.0)
 
-def calc_adx(high, low, close, n=14):
-    """
-    Wilder ADX.
-    輸入為 pd.Series。
-    """
+    tr = pd.concat([
+        high - low,
+        (high - close_prev).abs(),
+        (low - close_prev).abs(),
+    ], axis=1).max(axis=1)
 
-    high = pd.Series(high).astype(float)
-    low = pd.Series(low).astype(float)
-    close = pd.Series(close).astype(float)
-
-    prev_close = close.shift(1)
-
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    up_move = high - high.shift(1)
-    down_move = low.shift(1) - low
-
-    plus_dm = pd.Series(
-        np.where((up_move > down_move) & (up_move > 0), up_move, 0),
-        index=high.index
-    )
-
-    minus_dm = pd.Series(
-        np.where((down_move > up_move) & (down_move > 0), down_move, 0),
-        index=high.index
-    )
-
-    atr = tr.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-    plus_dm_smooth = plus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-    minus_dm_smooth = minus_dm.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    adx = dx.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
-
-    adx = adx.replace([np.inf, -np.inf], np.nan)
+    adx = dx.ewm(alpha=1 / n, adjust=False).mean()
 
     return adx, plus_di, minus_di
 
 
-def build_stock_regime_filter(adj_close, cfg):
+def build_market_regime_filter(adj_close, cfg):
+    stock_id = cfg["MARKET_PROXY_STOCK_ID"]
+    if stock_id not in adj_close.columns:
+        raise KeyError(f"找不到市場代理標的 {stock_id}")
+
+    close = adj_close[stock_id]
+    high_n = close.rolling(cfg["MARKET_HIGH_LOOKBACK"], min_periods=cfg["MARKET_HIGH_LOOKBACK"]).max()
+    drawdown = close / high_n - 1
+
+    raw_high = data.get("price:最高價")[stock_id].reindex(adj_close.index)
+    raw_low = data.get("price:最低價")[stock_id].reindex(adj_close.index)
+    raw_close = data.get("price:收盤價")[stock_id].reindex(adj_close.index)
+    adx, plus_di, minus_di = calc_adx_di(raw_high, raw_low, raw_close, cfg["MARKET_ADX_N"])
+
+    mode = cfg["MARKET_REGIME_MODE"]
+    threshold = cfg["MARKET_DRAWDOWN_THRESHOLD"]
+
+    if mode == "etf_drawdown_adx_or_di_plus":
+        market_filter = (
+            (drawdown <= threshold)
+            & (
+                (adx > cfg["MARKET_ADX_THRESHOLD"])
+                | ((adx < cfg["MARKET_ADX_THRESHOLD"]) & (plus_di > minus_di))
+            )
+        )
+    else:
+        raise ValueError(f"Unknown MARKET_REGIME_MODE: {mode}")
+
+    return market_filter.fillna(False), {
+        "market_drawdown_from_high": drawdown,
+        "market_adx": adx,
+        "market_plus_di": plus_di,
+        "market_minus_di": minus_di,
+        "market_filter_series": market_filter.fillna(False),
+    }
+
+
+def build_entry_signal(adj_close, volume, foreign_buy, cfg):
     ma_fast = rolling_mean(adj_close, cfg["MA_FAST"])
     ma_mid = rolling_mean(adj_close, cfg["MA_MID"])
     ma_slow = rolling_mean(adj_close, cfg["MA_SLOW"])
@@ -293,278 +294,56 @@ def build_stock_regime_filter(adj_close, cfg):
     bull_stack = (ma_fast > ma_mid) & (ma_mid > ma_slow)
 
     mode = cfg["STOCK_REGIME_MODE"]
-
     if mode == "not_bear_stack":
-        regime_filter = ~bear_stack
-
-    elif mode == "close_above_ma120":
-        regime_filter = adj_close > ma_slow
-
-    elif mode == "ma60_above_ma120":
-        regime_filter = ma_mid > ma_slow
-
-    elif mode == "strong_bull_stack":
-        regime_filter = bull_stack
-
+        stock_regime_filter = ~bear_stack
     else:
         raise ValueError(f"Unknown STOCK_REGIME_MODE: {mode}")
 
-    regime_info = {
-        "ma_fast": ma_fast,
-        "ma_mid": ma_mid,
-        "ma_slow": ma_slow,
-        "bear_stack": bear_stack,
-        "bull_stack": bull_stack,
-        "regime_filter": regime_filter,
-    }
-
-    return regime_filter, regime_info
-
-
-# ============================================================
-# 0050 market proxy
-# ============================================================
-
-def get_market_ohlc_0050_proxy(adj_close, cfg):
-    """
-    用 0050 OHLC 當大盤 proxy。
-    好處：0050 有 high / low / close，可以穩定計算 ADX / DI。
-    """
-
-    stock_id = cfg.get("MARKET_PROXY_STOCK_ID", "0050")
-
-    print(f"Loading market proxy OHLC: {stock_id}")
-
-    high_df = get_adjusted_price_from_twmarket("high", adj=True)
-    low_df = get_adjusted_price_from_twmarket("low", adj=True)
-    close_df = get_adjusted_price_from_twmarket("close", adj=True)
-
-    for name, df in [("high", high_df), ("low", low_df), ("close", close_df)]:
-        if stock_id not in df.columns:
-            raise RuntimeError(
-                f"找不到 {stock_id} 的 {name} 資料。"
-                f"目前欄位前 20 個：{list(df.columns[:20])}"
-            )
-
-    market_high = high_df[stock_id].reindex(adj_close.index).ffill()
-    market_low = low_df[stock_id].reindex(adj_close.index).ffill()
-    market_close = close_df[stock_id].reindex(adj_close.index).ffill()
-
-    print(f"Loaded market proxy: {stock_id}")
-    print(f"  valid high count:  {market_high.notna().sum()}")
-    print(f"  valid low count:   {market_low.notna().sum()}")
-    print(f"  valid close count: {market_close.notna().sum()}")
-
-    return market_high, market_low, market_close
-
-
-def build_market_regime_filter(adj_close, cfg):
-    """
-    大盤濾網使用 0050 proxy：
-
-    mode = etf_drawdown_adx_or_di_plus
-
-    條件：
-    0050 drawdown <= threshold
-    AND
-    (
-        ADX > ADX_THRESHOLD
-        OR
-        ADX < ADX_THRESHOLD AND DI+ > DI-
-    )
-    """
-
-    market_high, market_low, market_close = get_market_ohlc_0050_proxy(adj_close, cfg)
-
-    high_lookback = cfg.get("MARKET_HIGH_LOOKBACK", 200)
-    drawdown_threshold = cfg.get("MARKET_DRAWDOWN_THRESHOLD", -0.04)
-
-    adx_n = cfg.get("MARKET_ADX_N", 14)
-    adx_threshold = cfg.get("MARKET_ADX_THRESHOLD", 25)
-
-    market_rolling_high_close = market_close.rolling(
-        high_lookback,
-        min_periods=high_lookback
-    ).max()
-
-    market_drawdown_from_high = market_close / market_rolling_high_close - 1
-    drawdown_hit = market_drawdown_from_high <= drawdown_threshold
-
-    market_adx, market_plus_di, market_minus_di = calc_adx(
-        high=market_high,
-        low=market_low,
-        close=market_close,
-        n=adx_n
-    )
-
-    # 6/17 實驗：
-    # - ADX > 25：視為趨勢強，允許進場
-    # - ADX < 25：要求 DI+ > DI-
-    adx_strong = market_adx > adx_threshold
-    market_plus_di_rising = market_plus_di > market_plus_di.shift(1)
-    adx_weak_but_di_plus_rising = (market_adx < adx_threshold) & market_plus_di_rising
-
-    mode = cfg["MARKET_REGIME_MODE"]
-
-    if mode == "etf_drawdown_from_high":
-        market_filter = drawdown_hit
-
-    elif mode == "etf_drawdown_from_high_and_adx":
-        market_filter = drawdown_hit & adx_strong
-
-    elif mode == "etf_drawdown_adx_or_di_plus":
-        # 舊版保留：ADX 強，或 ADX 弱但 DI+ > DI-
-        adx_weak_but_di_plus = (market_adx < adx_threshold) & (market_plus_di > market_minus_di)
-        market_filter = drawdown_hit & (adx_strong | adx_weak_but_di_plus)
-
-    elif mode == "etf_drawdown_adx_or_di_plus_rising":
-        market_filter = drawdown_hit & (adx_strong | adx_weak_but_di_plus_rising)
-
-    else:
-        raise ValueError(
-            f"Unknown MARKET_REGIME_MODE: {mode}. "
-            "This version supports etf_drawdown_from_high, "
-            "etf_drawdown_from_high_and_adx, etf_drawdown_adx_or_di_plus, "
-            "and etf_drawdown_adx_or_di_plus_rising."
-        )
-
-    market_filter = market_filter.reindex(adj_close.index).fillna(False)
-
-    print("Market filter summary:")
-    print(f"  proxy: {cfg.get('MARKET_PROXY_STOCK_ID', '0050')}")
-    print(f"  mode: {mode}")
-    print(f"  high lookback: {high_lookback}")
-    print(f"  drawdown threshold: {drawdown_threshold:.2%}")
-    print(f"  ADX n: {adx_n}")
-    print(f"  ADX threshold: {adx_threshold}")
-    print(f"  drawdown hit days: {int(drawdown_hit.sum())}")
-    print(f"  ADX strong days: {int(adx_strong.sum())}")
-    print(f"  DI+ rising days: {int(market_plus_di_rising.sum())}")
-    print(f"  ADX weak but DI+ rising days: {int(adx_weak_but_di_plus_rising.sum())}")
-    print(f"  pass days: {int(market_filter.sum())}")
-    print(f"  total days: {len(market_filter)}")
-    print(f"  pass ratio: {market_filter.mean():.2%}")
-
-    print("  0050 drawdown quantiles:")
-    print(market_drawdown_from_high.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
-
-    print("  0050 ADX quantiles:")
-    print(market_adx.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
-
-    print("  0050 DI+ quantiles:")
-    print(market_plus_di.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
-
-    print("  0050 DI- quantiles:")
-    print(market_minus_di.quantile([0.1, 0.25, 0.5, 0.75, 0.9]))
-
-    return market_filter, {
-        "market_proxy_high": market_high,
-        "market_proxy_low": market_low,
-        "market_proxy_close": market_close,
-        "market_proxy_rolling_high_close": market_rolling_high_close,
-        "market_drawdown_from_high": market_drawdown_from_high,
-        "market_adx": market_adx,
-        "market_plus_di": market_plus_di,
-        "market_minus_di": market_minus_di,
-        "market_drawdown_hit": drawdown_hit,
-        "market_adx_strong": adx_strong,
-        "market_plus_di_rising": market_plus_di_rising,
-        "market_adx_weak_but_di_plus_rising": adx_weak_but_di_plus_rising,
-        "market_filter_series": market_filter,
-    }
-
-
-# ============================================================
-# Entry signal
-# ============================================================
-
-def build_entry_signal(adj_close, volume, foreign_buy, cfg):
-    print("Building vectorized indicators...")
-
-    # 1. 個股非空頭
-    stock_regime_filter, regime_info = build_stock_regime_filter(adj_close, cfg)
-
-    ma_fast = regime_info["ma_fast"]
-    ma_mid = regime_info["ma_mid"]
-    ma_slow = regime_info["ma_slow"]
-    bear_stack = regime_info["bear_stack"]
-    bull_stack = regime_info["bull_stack"]
-
-    # 2. BIAS 負乖離
-    ma_bias = rolling_mean(adj_close, cfg["BIAS_N"])
-    bias = adj_close / ma_bias - 1
+    bias = adj_close / rolling_mean(adj_close, cfg["BIAS_N"]) - 1
     bias_filter = bias < cfg["BIAS_THRESHOLD"]
 
-    # 3. RSV / K
-    # RSV cross 保留在 indicators 裡方便觀察，但本版不參與入場條件。
     rsv = calc_rsv(adj_close, cfg["RSV_N"])
-    rsv_cross_20 = (
-        (rsv > cfg["RSV_CROSS_LEVEL"]) &
-        (rsv.shift(1) <= cfg["RSV_CROSS_LEVEL"])
-    )
+    rsv_cross_20 = (rsv > cfg["RSV_CROSS_LEVEL"]) & (rsv.shift(1) <= cfg["RSV_CROSS_LEVEL"])
 
-    # 今 K > 昨 K
     k = calc_k_from_rsv(rsv, cfg["K_ALPHA"])
     k_up = k > k.shift(1)
 
-    # 4. MTM 轉強
     mtm = adj_close / adj_close.shift(cfg["MTM_N"]) - 1
     mtm_strengthen = mtm > mtm.shift(1)
 
-    if cfg["REQUIRE_MTM_NEGATIVE"]:
-        mtm_strengthen = mtm_strengthen & (mtm < 0)
-
-    # 5. MACD oscillator 柱狀體上升
-    macd_line, macd_signal, macd_osc = calc_macd_osc(
-        adj_close,
-        fast=cfg["MACD_FAST"],
-        slow=cfg["MACD_SLOW"],
-        signal=cfg["MACD_SIGNAL"],
-    )
+    ema_fast = adj_close.ewm(span=cfg["MACD_FAST"], adjust=False).mean()
+    ema_slow = adj_close.ewm(span=cfg["MACD_SLOW"], adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    macd_signal = macd_line.ewm(span=cfg["MACD_SIGNAL"], adjust=False).mean()
+    macd_osc = macd_line - macd_signal
     macd_osc_rising = macd_osc > macd_osc.shift(1)
 
-    # 6/17 MACD osc 版本：MTM 轉強 / 今K>昨K / MACD-osc 上升，三選一
     mean_reversion_trigger = macd_osc_rising
 
-    # 6. 外資買超佔成交量 3 日新高
     foreign_ratio = foreign_buy / volume
     foreign_ratio = foreign_ratio.replace([np.inf, -np.inf], np.nan)
 
     foreign_buy_positive = foreign_buy > 0
-
     foreign_ratio_new_high = (
-        foreign_ratio ==
-        foreign_ratio.rolling(
+        foreign_ratio == foreign_ratio.rolling(
             cfg["FOREIGN_RATIO_LOOKBACK"],
-            min_periods=cfg["FOREIGN_RATIO_LOOKBACK"]
+            min_periods=cfg["FOREIGN_RATIO_LOOKBACK"],
         ).max()
     )
-
     foreign_filter = foreign_buy_positive & foreign_ratio_new_high
 
-    signal_before_market = (
-        stock_regime_filter &
-        bias_filter &
-        mean_reversion_trigger &
-        foreign_filter
-    )
+    signal_before_market = stock_regime_filter & bias_filter & mean_reversion_trigger & foreign_filter
 
-    # 7. 大盤濾網：0050 drawdown + ADX/DI
     if cfg["USE_MARKET_FILTER"]:
         market_filter_series, market_info = build_market_regime_filter(adj_close, cfg)
-
         market_filter = pd.DataFrame(
             np.repeat(market_filter_series.values.reshape(-1, 1), adj_close.shape[1], axis=1),
             index=adj_close.index,
-            columns=adj_close.columns
+            columns=adj_close.columns,
         )
     else:
         print("Market filter is OFF. All True.")
-        market_filter = pd.DataFrame(
-            True,
-            index=adj_close.index,
-            columns=adj_close.columns
-        )
+        market_filter = pd.DataFrame(True, index=adj_close.index, columns=adj_close.columns)
         market_info = {}
 
     signal_close_day = signal_before_market & market_filter
@@ -581,7 +360,6 @@ def build_entry_signal(adj_close, volume, foreign_buy, cfg):
     print(f"  K up count:                   {int(k_up.sum().sum())}")
     print(f"  MACD osc rising count:        {int(macd_osc_rising.sum().sum())}")
 
-    # 前一天收盤成立，隔天開盤進場
     entry_next_open = signal_close_day.shift(1).fillna(False)
 
     indicators = {
@@ -591,46 +369,33 @@ def build_entry_signal(adj_close, volume, foreign_buy, cfg):
         "bear_stack": bear_stack,
         "bull_stack": bull_stack,
         "stock_regime_filter": stock_regime_filter,
-
         "bias": bias,
         "bias_filter": bias_filter,
-
         "rsv": rsv,
         "rsv_cross_20": rsv_cross_20,
-
         "k": k,
         "k_up": k_up,
-
         "mtm": mtm,
         "mtm_strengthen": mtm_strengthen,
-
         "macd_line": macd_line,
         "macd_signal": macd_signal,
         "macd_osc": macd_osc,
         "macd_osc_rising": macd_osc_rising,
-
         "mean_reversion_trigger": mean_reversion_trigger,
-
         "foreign_ratio": foreign_ratio,
         "foreign_buy_positive": foreign_buy_positive,
         "foreign_ratio_new_high": foreign_ratio_new_high,
         "foreign_filter": foreign_filter,
-
         "market_filter": market_filter,
-
         "signal_before_market": signal_before_market,
         "signal_close_day": signal_close_day,
         "entry_next_open": entry_next_open,
     }
-
     indicators.update(market_info)
 
     print("Entry signal built.")
     print(f"Raw entry signals: {int(entry_next_open.sum().sum())}")
-
     return entry_next_open, indicators
-
-
 
 
 # ============================================================
@@ -649,12 +414,7 @@ def _latest_valid_date(df: pd.DataFrame) -> pd.Timestamp:
     return pd.Timestamp(df.index[valid][-1])
 
 
-def _latest_common_data_date(
-    adj_close: pd.DataFrame,
-    volume: pd.DataFrame,
-    foreign_buy: pd.DataFrame,
-) -> pd.Timestamp:
-    """Latest date on which every input required by the entry rule is available."""
+def _latest_common_data_date(adj_close, volume, foreign_buy) -> pd.Timestamp:
     usable = (
         adj_close.notna().any(axis=1)
         & volume.notna().any(axis=1)
@@ -665,27 +425,14 @@ def _latest_common_data_date(
     return pd.Timestamp(usable.index[usable][-1])
 
 
-def _print_signal_date_diagnostics(
-    d: pd.Timestamp,
-    indicators: dict,
-    adj_close: pd.DataFrame,
-) -> tuple[dict[str, int | bool], dict[str, pd.DataFrame]]:
-    """Print and return every cumulative screening layer for the signal date."""
+def _print_signal_date_diagnostics(d, indicators, adj_close):
     individual_names = [
-        "stock_regime_filter",
-        "bias_filter",
-        "macd_osc_rising",
-        "foreign_buy_positive",
-        "foreign_ratio_new_high",
-        "foreign_filter",
-        "signal_before_market",
-        "signal_close_day",
+        "stock_regime_filter", "bias_filter", "macd_osc_rising",
+        "foreign_buy_positive", "foreign_ratio_new_high", "foreign_filter",
+        "signal_before_market", "signal_close_day",
     ]
-    stats: dict[str, int | bool] = {}
-    rows = {
-        name: indicators[name].loc[d].fillna(False).astype(bool)
-        for name in individual_names
-    }
+    stats = {}
+    rows = {name: indicators[name].loc[d].fillna(False).astype(bool) for name in individual_names}
 
     print(f"\nSignal-date individual counts ({d.date()}):")
     for name in individual_names:
@@ -698,7 +445,6 @@ def _print_signal_date_diagnostics(
     stats["market_filter_pass"] = market_pass
     print(f"  {'market_filter_pass':26s}: {market_pass}")
 
-    # These are the actual AND operations used by signal_before_market.
     funnel_steps = [
         ("stock regime", "stock_regime_filter"),
         ("+ BIAS filter", "bias_filter"),
@@ -707,20 +453,12 @@ def _print_signal_date_diagnostics(
         ("+ foreign ratio 3D high", "foreign_ratio_new_high"),
     ]
     cumulative = None
-    funnel_frames: dict[str, pd.DataFrame] = {}
+    funnel_frames = {}
     macd_change = indicators["macd_osc"] - indicators["macd_osc"].shift(1)
 
-    def make_stage_frame(
-        mask: pd.Series,
-        stage_order: int,
-        stage_key: str,
-        stage_label: str,
-    ) -> pd.DataFrame:
+    def make_stage_frame(mask, stage_order, stage_key, stage_label):
         selected = mask.index[mask.fillna(False)]
-        stock_ids = [
-            str(stock_id).zfill(4) if str(stock_id).isdigit() else str(stock_id)
-            for stock_id in selected
-        ]
+        stock_ids = [str(stock_id).zfill(4) if str(stock_id).isdigit() else str(stock_id) for stock_id in selected]
         frame = pd.DataFrame({
             "signal_date": d,
             "stage_order": stage_order,
@@ -743,12 +481,7 @@ def _print_signal_date_diagnostics(
         cumulative = rows[name].copy() if cumulative is None else cumulative & rows[name]
         count = int(cumulative.sum())
         stats[f"funnel_{name}"] = count
-        funnel_frames[f"{stage_order}_{name}"] = make_stage_frame(
-            cumulative,
-            stage_order,
-            name,
-            label,
-        )
+        funnel_frames[f"{stage_order}_{name}"] = make_stage_frame(cumulative, stage_order, name, label)
         print(f"  {label:28s}: {count}")
         if 0 < count <= 20:
             passing = funnel_frames[f"{stage_order}_{name}"]["stock_id"].tolist()
@@ -761,12 +494,7 @@ def _print_signal_date_diagnostics(
 
     final_count = int(rows["signal_close_day"].sum())
     stats["signal_close_day"] = final_count
-    funnel_frames["6_market_filter"] = make_stage_frame(
-        rows["signal_close_day"],
-        6,
-        "market_filter",
-        "+ market filter",
-    )
+    funnel_frames["6_market_filter"] = make_stage_frame(rows["signal_close_day"], 6, "market_filter", "+ market filter")
     print(f"  {'+ market filter':28s}: {final_count}")
     if 0 < final_count <= 20:
         passing = funnel_frames["6_market_filter"]["stock_id"].tolist()
@@ -775,17 +503,11 @@ def _print_signal_date_diagnostics(
 
 
 def load_current_holdings(path: str | None) -> pd.DataFrame:
-    """
-    Optional holdings file. Supported formats: CSV / XLSX / Parquet.
-    Required stock-id column can be one of: stock_id, stock_no, symbol.
-    """
     if not path:
         return pd.DataFrame(columns=["stock_id"])
-
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"持股檔不存在：{p}")
-
     suffix = p.suffix.lower()
     if suffix == ".csv":
         df = pd.read_csv(p)
@@ -795,32 +517,14 @@ def load_current_holdings(path: str | None) -> pd.DataFrame:
         df = pd.read_parquet(p)
     else:
         raise ValueError("持股檔只支援 CSV / XLSX / Parquet。")
-
     stock_col = next((c for c in ["stock_id", "stock_no", "symbol"] if c in df.columns), None)
     if stock_col is None:
         raise ValueError("持股檔需包含 stock_id、stock_no 或 symbol 欄位。")
-
     out = pd.DataFrame({"stock_id": df[stock_col].astype(str).str.zfill(4)})
     return out.drop_duplicates().reset_index(drop=True)
 
 
-def build_daily_candidates(
-    cfg: dict,
-    holdings_path: str | None = None,
-    total_equity: float | None = None,
-    signal_date: str | None = None,
-):
-    """
-    Daily selection logic:
-    1. Use the close-day signal; intended entry is next trading day's open.
-    2. MACD oscillator rising only.
-    3. BIAS < threshold.
-    4. Foreign-buy ratio is a 3-day high and foreign buying is positive.
-    5. 0050 market filter passes.
-    6. Rank by BIAS ascending (deeper pullback first).
-    7. Exclude currently held names.
-    8. Keep only remaining slots under MAX_POSITIONS.
-    """
+def build_daily_candidates(cfg, holdings_path=None, total_equity=None, signal_date=None):
     adj_open, adj_close, volume, foreign_buy = get_price_data(cfg)
 
     start = cfg.get("DATA_START")
@@ -836,12 +540,7 @@ def build_daily_candidates(
         volume = volume.loc[:end]
         foreign_buy = foreign_buy.loc[:end]
 
-    _, indicators = build_entry_signal(
-        adj_close=adj_close,
-        volume=volume,
-        foreign_buy=foreign_buy,
-        cfg=cfg,
-    )
+    _, indicators = build_entry_signal(adj_close, volume, foreign_buy, cfg)
 
     latest_price_date = _latest_valid_date(adj_close)
     latest_common_date = _latest_common_data_date(adj_close, volume, foreign_buy)
@@ -853,21 +552,16 @@ def build_daily_candidates(
     if signal_date is None:
         d = latest_common_date
     else:
-        d = pd.Timestamp(signal_date)
+        d = pd.Timestamp(signal_date).normalize()
         if d not in adj_close.index:
-            prior = adj_close.index[adj_close.index <= d]
-            if len(prior) == 0:
-                raise ValueError(f"指定日期 {d.date()} 之前沒有交易資料。")
-            d = pd.Timestamp(prior[-1])
+            raise ValueError(f"指定訊號日 {d.date()} 不存在於調整後收盤價資料；不自動回退日期。")
 
+    if not adj_close.loc[d].notna().any():
+        raise ValueError(f"指定訊號日 {d.date()} 沒有有效收盤價資料。")
     if not volume.loc[d].notna().any() or not foreign_buy.loc[d].notna().any():
         raise ValueError(f"指定訊號日 {d.date()} 的成交量或外資資料尚未齊全。")
 
-    condition_counts, funnel_candidates = _print_signal_date_diagnostics(
-        d,
-        indicators,
-        adj_close,
-    )
+    condition_counts, funnel_candidates = _print_signal_date_diagnostics(d, indicators, adj_close)
     signal_row = indicators["signal_close_day"].loc[d].fillna(False)
     stock_ids = signal_row[signal_row].index.astype(str)
 
@@ -905,22 +599,14 @@ def build_daily_candidates(
         held_set = set(holdings["stock_id"])
         candidates["stock_id"] = candidates["stock_id"].astype(str).str.zfill(4)
         candidates["already_held"] = candidates["stock_id"].isin(held_set)
-
-        candidates = candidates.sort_values(
-            ["bias_at_signal", "stock_id"],
-            ascending=[True, True],
-            na_position="last",
-        ).reset_index(drop=True)
+        candidates = candidates.sort_values(["bias_at_signal", "stock_id"], ascending=[True, True], na_position="last").reset_index(drop=True)
         candidates.insert(0, "rank", np.arange(1, len(candidates) + 1))
-
-        if total_equity is not None:
-            candidates["suggested_position_value"] = float(total_equity) * cfg["POSITION_PCT"]
-        else:
-            candidates["suggested_position_value"] = np.nan
+        candidates["suggested_position_value"] = (
+            float(total_equity) * cfg["POSITION_PCT"] if total_equity is not None else np.nan
+        )
 
     current_positions = len(load_current_holdings(holdings_path))
     available_slots = max(0, int(cfg["MAX_POSITIONS"]) - current_positions)
-
     buy_list = candidates.loc[~candidates.get("already_held", False)].head(available_slots).copy()
     buy_list["selected_for_next_open"] = True
 
@@ -939,7 +625,6 @@ def build_daily_candidates(
 def save_daily_selection(result: dict, output_dir: str = "."):
     outdir = Path(output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
-
     d = pd.Timestamp(result["signal_date"]).strftime("%Y%m%d")
     run_cfg = result.get("config", CONFIG)
     prefix = run_cfg["OUTPUT_PREFIX"]
@@ -952,10 +637,7 @@ def save_daily_selection(result: dict, output_dir: str = "."):
     result["all_candidates"].to_csv(csv_all, index=False, encoding="utf-8-sig")
     result["buy_list"].to_csv(csv_buy, index=False, encoding="utf-8-sig")
     funnel_frames = result.get("funnel_candidates", {})
-    funnel_long = (
-        pd.concat(funnel_frames.values(), ignore_index=True)
-        if funnel_frames else pd.DataFrame()
-    )
+    funnel_long = pd.concat(funnel_frames.values(), ignore_index=True) if funnel_frames else pd.DataFrame()
     funnel_long.to_csv(csv_funnel, index=False, encoding="utf-8-sig")
 
     with pd.ExcelWriter(xlsx) as writer:
@@ -971,55 +653,23 @@ def save_daily_selection(result: dict, output_dir: str = "."):
             "6_market_filter": "F6_plus_market",
         }
         for stage_key, frame in funnel_frames.items():
-            frame.to_excel(
-                writer,
-                sheet_name=funnel_sheet_names.get(stage_key, stage_key[:31]),
-                index=False,
-            )
+            frame.to_excel(writer, sheet_name=funnel_sheet_names.get(stage_key, stage_key[:31]), index=False)
         pd.DataFrame([{
             "signal_date": result["signal_date"],
             "current_positions": result["current_positions"],
             "available_slots": result["available_slots"],
-            "position_pct": run_cfg["POSITION_PCT"],
-            "max_positions": run_cfg["MAX_POSITIONS"],
-            "stop_loss": run_cfg["STOP_LOSS"],
-            "max_hold_days": run_cfg["MAX_HOLD_DAYS"],
-        }]).to_excel(writer, sheet_name="run_info", index=False)
+            "candidate_count": len(result["all_candidates"]),
+            "buy_count": len(result["buy_list"]),
+        }]).to_excel(writer, sheet_name="summary", index=False)
 
-    print("\nDaily selector result")
-    print(f"  signal date:       {result['signal_date'].date()}")
-    print(f"  candidates:        {len(result['all_candidates'])}")
-    print(f"  current positions: {result['current_positions']}")
-    print(f"  available slots:   {result['available_slots']}")
-    print(f"  selected buys:     {len(result['buy_list'])}")
-    print(f"  Excel:             {xlsx}")
-    print(f"  Buy list CSV:      {csv_buy}")
-    print(f"  Funnel CSV:        {csv_funnel}")
-
-    if not result["buy_list"].empty:
-        display_cols = [
-            "rank", "stock_id", "bias_at_signal", "macd_osc_change_at_signal",
-            "foreign_ratio_at_signal", "close_at_signal", "suggested_position_value",
-        ]
-        print("\nSuggested buy list (next open):")
-        print(result["buy_list"][display_cols].to_string(index=False))
-    else:
-        print("\nNo buy candidates for next open.")
-
-    return xlsx, csv_buy, csv_all, csv_funnel
-
-
-if __name__ == "__main__":
-    # Optional: set these values before running.
-    HOLDINGS_FILE = None       # e.g. r"D:\\HAW\\current_holdings.csv"
-    TOTAL_EQUITY = 1_000_000   # used only to calculate suggested 5% position value
-    OUTPUT_DIR = "."
-    SIGNAL_DATE = None         # None = latest available trading date
-
-    result = build_daily_candidates(
-        cfg=CONFIG,
-        holdings_path=HOLDINGS_FILE,
-        total_equity=TOTAL_EQUITY,
-        signal_date=SIGNAL_DATE,
-    )
-    save_daily_selection(result, output_dir=OUTPUT_DIR)
+    print("Daily selector output saved:")
+    print(f"  {csv_all}")
+    print(f"  {csv_buy}")
+    print(f"  {csv_funnel}")
+    print(f"  {xlsx}")
+    return {
+        "all_candidates_csv": csv_all,
+        "buy_list_csv": csv_buy,
+        "funnel_candidates_csv": csv_funnel,
+        "xlsx": xlsx,
+    }
