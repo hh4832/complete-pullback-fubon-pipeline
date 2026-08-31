@@ -8,6 +8,7 @@ from finlab import data
 
 import integrated_stock_pipeline_exitlog_fixed_strategy_ledger_v2 as legacy
 from finlab_market_breadth import (
+    EVENT_REFERENCE_DATASETS,
     add_limit_prices_legacy_compatible,
     calc_breadth,
     load_finlab_market_breadth_data,
@@ -37,6 +38,24 @@ def classify_rows(df: pd.DataFrame, *, new_schema: bool) -> pd.Series:
     return labels
 
 
+def _event_reference_values(d: pd.Timestamp, symbols: list[str]) -> dict[str, dict[str, object]]:
+    """Return non-null event reference values for diagnostic symbols."""
+    out: dict[str, dict[str, object]] = {s: {} for s in symbols}
+    for ds in EVENT_REFERENCE_DATASETS:
+        try:
+            x = data.get(ds)
+        except Exception:
+            continue
+        if d not in x.index:
+            continue
+        for s in symbols:
+            if s in x.columns:
+                v = x.loc[d, s]
+                if pd.notna(v):
+                    out[s][ds] = v
+    return out
+
+
 def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
     """Explain why legacy and FinLab universes differ for the target date."""
     d = result.target_date
@@ -44,10 +63,25 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
     new_symbols = set(result.stock_df.index.astype(str))
     symbols = sorted(old_symbols ^ new_symbols)
 
-    raw_close = data.get("price:收盤價")
-    raw_volume = data.get("price:成交股數")
+    raw_close = data.get("price:收盤價").sort_index()
+    raw_volume = data.get("price:成交股數").sort_index()
+    prev_close_matrix = raw_close.shift(1)
     cats = result.security_categories.copy()
     ordinary = set(ordinary_stock_symbols(cats).astype(str))
+    event_refs = _event_reference_values(d, symbols)
+
+    # The legacy implementation first filters by current official company-profile
+    # OpenAPI lists, then by target-date trading data.  Expose that membership
+    # separately so a universe-list mismatch is not confused with price logic.
+    try:
+        legacy_twse_company = legacy.fetch_common_stock_set(2)
+    except Exception:
+        legacy_twse_company = set()
+    try:
+        legacy_tpex_company = legacy.fetch_common_stock_set(4)
+    except Exception:
+        legacy_tpex_company = set()
+    legacy_company_set = legacy_twse_company | legacy_tpex_company
 
     cat_lookup = (
         cats.drop_duplicates(subset=["stock_id"], keep="last")
@@ -59,9 +93,13 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
         cat = cat_lookup.loc[s] if s in cat_lookup.index else None
         close = raw_close.loc[d, s] if d in raw_close.index and s in raw_close.columns else pd.NA
         volume = raw_volume.loc[d, s] if d in raw_volume.index and s in raw_volume.columns else pd.NA
+        prev_close = prev_close_matrix.loc[d, s] if d in prev_close_matrix.index and s in prev_close_matrix.columns else pd.NA
         category = cat.get("category", "") if cat is not None else ""
         market = cat.get("market", "") if cat is not None else ""
         name = cat.get("name", "") if cat is not None and "name" in cat.index else ""
+        refs = event_refs.get(s, {})
+        event_ref_value = next(iter(refs.values())) if refs else pd.NA
+        event_ref_source = next(iter(refs.keys())) if refs else ""
 
         reasons = []
         if s not in ordinary:
@@ -84,6 +122,10 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
             reasons.append("close_missing")
         if pd.isna(vol_num) or vol_num <= 0:
             reasons.append("not_traded_or_volume_missing")
+        if s in ordinary and pd.notna(close) and vol_num > 0 and pd.isna(prev_close) and not refs:
+            reasons.append("reference_missing")
+        if s not in legacy_company_set:
+            reasons.append("not_in_legacy_company_openapi")
 
         rows.append({
             "stock_id": s,
@@ -92,9 +134,13 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
             "market": market,
             "legacy_in": s in old_symbols,
             "finlab_in": s in new_symbols,
+            "legacy_company_openapi": s in legacy_company_set,
             "finlab_ordinary_rule": s in ordinary,
             "close": close,
             "volume": volume,
+            "prev_raw_close": prev_close,
+            "event_ref": event_ref_value,
+            "event_ref_source": event_ref_source,
             "diagnosis": ";".join(reasons),
         })
 
