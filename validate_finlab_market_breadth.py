@@ -70,9 +70,6 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
     ordinary = set(ordinary_stock_symbols(cats).astype(str))
     event_refs = _event_reference_values(d, symbols)
 
-    # The legacy implementation first filters by current official company-profile
-    # OpenAPI lists, then by target-date trading data.  Expose that membership
-    # separately so a universe-list mismatch is not confused with price logic.
     try:
         legacy_twse_company = legacy.fetch_common_stock_set(2)
     except Exception:
@@ -124,7 +121,7 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
             reasons.append("not_traded_or_volume_missing")
         if s in ordinary and pd.notna(close) and vol_num > 0 and pd.isna(prev_close) and not refs:
             reasons.append("reference_missing")
-        if s not in legacy_company_set:
+        if legacy_company_set and s not in legacy_company_set:
             reasons.append("not_in_legacy_company_openapi")
 
         rows.append({
@@ -134,7 +131,7 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
             "market": market,
             "legacy_in": s in old_symbols,
             "finlab_in": s in new_symbols,
-            "legacy_company_openapi": s in legacy_company_set,
+            "legacy_company_openapi": (s in legacy_company_set) if legacy_company_set else pd.NA,
             "finlab_ordinary_rule": s in ordinary,
             "close": close,
             "volume": volume,
@@ -150,7 +147,14 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
 def print_legacy_comparison(result, stats) -> None:
     target = result.target_date.date()
     print("\n=== Legacy TWSE/TPEX comparison ===")
-    old_df, old_taiex, old_otc = legacy.fetch_market_snapshot(target)
+    try:
+        old_df, old_taiex, old_otc = legacy.fetch_market_snapshot(target)
+    except Exception as exc:
+        print("[WARNING] Legacy TWSE/TPEX comparison unavailable; FinLab validation remains valid.")
+        print(f"reason: {type(exc).__name__}: {exc}")
+        print("This failure is isolated to the external legacy exchange API and does not affect FinLab-only output.")
+        return
+
     old_stats = legacy.calc_breadth(old_df, taiex_pct=old_taiex, include_vs_market=False)
 
     keys = ["漲停", "大漲", "小漲", "平盤", "小跌", "大跌", "跌停", "總上漲", "總下跌", "總家數"]
