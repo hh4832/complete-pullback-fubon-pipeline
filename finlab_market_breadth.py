@@ -7,7 +7,7 @@ Universe definition:
 - Traded on target date: close is present and volume > 0
 
 Return basis:
-- Normal day: previous trading day's raw close
+- Normal day: previous valid raw close for that security
 - Corporate-action day: overwrite with FinLab official event reference prices
   for dividends/ex-rights, capital reduction, and par value changes.
 
@@ -91,7 +91,11 @@ def _overlay_event_reference_prices(
 
 
 def build_reference_price_matrix(close: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
-    reference = close.shift(1)
+    # Reference price is security-specific.  If a stock did not trade on the
+    # immediately preceding market day, the baseline must use its last valid
+    # raw close rather than becoming NaN.  Corporate-action reference prices
+    # below still override this baseline on the event date.
+    reference = close.ffill().shift(1)
     return _overlay_event_reference_prices(reference)
 
 
