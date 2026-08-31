@@ -11,6 +11,10 @@ Return basis:
 - Corporate-action day: overwrite with FinLab official event reference prices
   for dividends/ex-rights, capital reduction, and par value changes.
 
+Market index basis:
+- market_transaction_info:收盤指數
+- TAIEX and OTC use previous valid index close to calculate daily percent change.
+
 This module is intentionally independent from the production pipeline so it can
 be validated before replacing the legacy TWSE/TPEX API implementation.
 """
@@ -32,6 +36,9 @@ EVENT_REFERENCE_DATASETS = [
     "par_value_change_tse:恢復買賣參考價",
     "par_value_change_otc:恢復買賣開始日參考價",
 ]
+
+INDEX_DATASET = "market_transaction_info:收盤指數"
+INDEX_SYMBOLS = ("TAIEX", "OTC")
 
 
 @dataclass
@@ -91,10 +98,9 @@ def _overlay_event_reference_prices(
 
 
 def build_reference_price_matrix(close: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
-    # Reference price is security-specific.  If a stock did not trade on the
-    # immediately preceding market day, the baseline must use its last valid
-    # raw close rather than becoming NaN.  Corporate-action reference prices
-    # below still override this baseline on the event date.
+    # Reference price is security-specific. If a stock did not trade on the
+    # immediately preceding market day, use its last valid raw close.
+    # Corporate-action reference prices still override this baseline.
     reference = close.ffill().shift(1)
     return _overlay_event_reference_prices(reference)
 
@@ -147,13 +153,34 @@ def load_finlab_market_breadth_data(target_date: str | pd.Timestamp) -> BreadthD
     )
 
 
-def get_tick_size_series(reference: pd.Series) -> pd.Series:
-    """Match the existing production tick-size rule exactly.
+def load_market_index_returns(target_date: str | pd.Timestamp) -> dict[str, float]:
+    """Return daily TAIEX / OTC percent changes from FinLab only."""
+    d = _normalize_date(target_date)
+    index_close = data.get(INDEX_DATASET).sort_index()
 
-    Important: the tick bucket is determined from the day's reference price,
-    not from the calculated +/-10% limit price.  Using the limit price itself
-    misclassifies names that cross a tick boundary (e.g. 500 or 1000).
-    """
+    missing_cols = set(INDEX_SYMBOLS) - set(index_close.columns)
+    if missing_cols:
+        raise RuntimeError(f"{INDEX_DATASET} 缺少指數欄位: {sorted(missing_cols)}")
+    if d not in index_close.index:
+        raise ValueError(f"{INDEX_DATASET} 沒有指定交易日 {d.date()}")
+
+    selected = index_close.loc[:, list(INDEX_SYMBOLS)].apply(pd.to_numeric, errors="coerce")
+    previous_valid = selected.ffill().shift(1)
+
+    out: dict[str, float] = {}
+    for symbol in INDEX_SYMBOLS:
+        current = selected.loc[d, symbol]
+        previous = previous_valid.loc[d, symbol]
+        if pd.isna(current) or pd.isna(previous) or float(previous) == 0:
+            raise RuntimeError(
+                f"無法計算 {symbol} {d.date()} 日報酬：current={current}, previous={previous}"
+            )
+        out[symbol] = (float(current) / float(previous) - 1.0) * 100.0
+    return out
+
+
+def get_tick_size_series(reference: pd.Series) -> pd.Series:
+    """Match the existing production tick-size rule exactly."""
     return pd.cut(
         reference,
         bins=[0, 10, 50, 100, 500, 1000, float("inf")],
@@ -200,3 +227,21 @@ def calc_breadth(stock_df: pd.DataFrame) -> dict[str, int]:
     # Preserve current Google Sheet semantics: total movers excludes flat names.
     stats["總家數"] = stats["總上漲"] + stats["總下跌"]
     return stats
+
+
+def fetch_finlab_market_snapshot(
+    target_date: str | pd.Timestamp,
+) -> tuple[pd.DataFrame, float, float]:
+    """Production-compatible FinLab-only market snapshot.
+
+    Returns (stock_df, taiex_pct, otc_pct) using the same tuple contract as the
+    legacy TWSE/TPEX fetch_market_snapshot function.
+    """
+    result = load_finlab_market_breadth_data(target_date)
+    stock_df = add_limit_prices_legacy_compatible(result.stock_df).rename(
+        columns={"參考價": "前收"}
+    )
+    stock_df = stock_df[["漲跌幅", "收盤價", "漲停價", "跌停價"]]
+
+    index_returns = load_market_index_returns(target_date)
+    return stock_df, index_returns["TAIEX"], index_returns["OTC"]
