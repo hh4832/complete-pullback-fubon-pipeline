@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
 
+import integrated_stock_pipeline_exitlog_fixed_strategy_ledger_v2 as broker_base
+from finlab_market_breadth import fetch_finlab_market_snapshot
 from integrated_stock_pipeline_strategy_complete_v2 import PipelineConfig
 from complete_pullback_fubon_pipeline_v2 import CompletePipelineConfig, run_complete_daily_pipeline
+
+
+# Production market breadth source: FinLab-only.
+# Keep the base pipeline's downstream interface unchanged: the replacement
+# returns (stock_df, taiex_pct, otc_pct), so Google Sheet / holdings breadth
+# logic does not need to change in this phase.
+broker_base.fetch_market_snapshot = fetch_finlab_market_snapshot
 
 
 if __name__ == "__main__":
