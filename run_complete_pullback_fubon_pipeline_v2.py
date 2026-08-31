@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
+from datetime import datetime
+import os
 from pathlib import Path
+import shutil
+import subprocess
+from zoneinfo import ZoneInfo
 
 import integrated_stock_pipeline_exitlog_fixed_strategy_ledger_v2 as broker_base
 from finlab_market_breadth import fetch_finlab_market_snapshot
@@ -12,6 +17,94 @@ from complete_pullback_fubon_pipeline_v2 import CompletePipelineConfig, run_comp
 # returns (stock_df, taiex_pct, otc_pct), so Google Sheet / holdings breadth
 # logic does not need to change in this phase.
 broker_base.fetch_market_snapshot = fetch_finlab_market_snapshot
+
+
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+REPO_NAME = "complete-pullback-fubon-pipeline"
+
+
+def _git_value(project_dir: Path, *args: str, fallback: str = "unknown") -> str:
+    try:
+        return subprocess.check_output(
+            ["git", *args], cwd=project_dir, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return fallback
+
+
+def archive_run_to_google_drive(project_dir: Path, result: dict) -> Path | None:
+    """Archive formal run outputs to Google Drive when Drive is mounted.
+
+    Default Colab destination:
+      MyDrive/Quant_Research/complete-pullback-fubon-pipeline/
+      YYYYMMDD_HHMMSS_<git_commit>/
+
+    Set QUANT_RESEARCH_DRIVE_ROOT to override the Quant_Research root.
+    If Google Drive is not mounted, archive is skipped without failing the
+    trading pipeline.
+    """
+    project_dir = Path(project_dir).resolve()
+
+    override_root = os.getenv("QUANT_RESEARCH_DRIVE_ROOT", "").strip()
+    if override_root:
+        quant_root = Path(override_root).expanduser()
+    else:
+        mydrive = Path("/content/drive/MyDrive")
+        if not mydrive.exists():
+            print("[WARN] Google Drive 未掛載，略過 output archive。")
+            return None
+        quant_root = mydrive / "Quant_Research"
+
+    timestamp = datetime.now(TAIPEI_TZ).strftime("%Y%m%d_%H%M%S")
+    commit_full = _git_value(project_dir, "rev-parse", "HEAD")
+    commit_short = _git_value(project_dir, "rev-parse", "--short", "HEAD")
+    branch = _git_value(project_dir, "rev-parse", "--abbrev-ref", "HEAD")
+
+    repo_root = quant_root / REPO_NAME
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    base_name = f"{timestamp}_{commit_short}"
+    run_dir = repo_root / base_name
+    suffix = 1
+    while run_dir.exists():
+        run_dir = repo_root / f"{base_name}_{suffix:02d}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    archived = []
+    for folder_name in (
+        "output_integrated_stock",
+        "output_selector",
+        "strategy_ledger",
+    ):
+        src = project_dir / folder_name
+        if src.exists():
+            shutil.copytree(src, run_dir / folder_name)
+            archived.append(folder_name)
+
+    selection = result.get("selection", {}) if isinstance(result, dict) else {}
+    signal_date = selection.get("signal_date", "unknown")
+    buy_candidates = len(selection.get("buy_list", [])) if selection else 0
+    new_intents = result.get("new_order_intents", []) if isinstance(result, dict) else []
+
+    run_info = "\n".join(
+        [
+            f"timestamp_taipei={timestamp}",
+            "timezone=Asia/Taipei",
+            f"git_commit={commit_full}",
+            f"git_commit_short={commit_short}",
+            f"git_branch={branch}",
+            f"signal_date={signal_date}",
+            f"buy_candidates={buy_candidates}",
+            f"new_order_intents={len(new_intents)}",
+            "market_breadth_source=FinLab",
+            f"archived_folders={','.join(archived)}",
+        ]
+    ) + "\n"
+    (run_dir / "run_info.txt").write_text(run_info, encoding="utf-8")
+
+    print(f"[OK] Output archive：{run_dir}")
+    return run_dir
 
 
 if __name__ == "__main__":
@@ -64,3 +157,10 @@ if __name__ == "__main__":
     print("Buy candidates:", len(result["selection"]["buy_list"]))
     print("New intents:", len(result["new_order_intents"]))
     print("Intent file:", result["order_intent_path"])
+
+    try:
+        archive_run_to_google_drive(PROJECT_DIR, result)
+    except Exception as exc:
+        # Output archiving is important for reproducibility, but it must not
+        # retroactively turn a completed trading pipeline into a failed run.
+        print(f"[WARN] Output archive 失敗：{exc}")
