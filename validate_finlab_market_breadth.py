@@ -39,7 +39,6 @@ def classify_rows(df: pd.DataFrame, *, new_schema: bool) -> pd.Series:
 
 
 def _event_reference_values(d: pd.Timestamp, symbols: list[str]) -> dict[str, dict[str, object]]:
-    """Return non-null event reference values for diagnostic symbols."""
     out: dict[str, dict[str, object]] = {s: {} for s in symbols}
     for ds in EVENT_REFERENCE_DATASETS:
         try:
@@ -57,7 +56,6 @@ def _event_reference_values(d: pd.Timestamp, symbols: list[str]) -> dict[str, di
 
 
 def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
-    """Explain why legacy and FinLab universes differ for the target date."""
     d = result.target_date
     old_symbols = set(old_df.index.astype(str))
     new_symbols = set(result.stock_df.index.astype(str))
@@ -80,10 +78,7 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
         legacy_tpex_company = set()
     legacy_company_set = legacy_twse_company | legacy_tpex_company
 
-    cat_lookup = (
-        cats.drop_duplicates(subset=["stock_id"], keep="last")
-        .set_index("stock_id")
-    )
+    cat_lookup = cats.drop_duplicates(subset=["stock_id"], keep="last").set_index("stock_id")
 
     rows = []
     for s in symbols:
@@ -144,6 +139,45 @@ def build_universe_diagnostic(result, old_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("stock_id") if rows else pd.DataFrame()
 
 
+def print_index_dataset_diagnostics(d: pd.Timestamp) -> None:
+    """Inspect FinLab index datasets needed for 加權% / 櫃買%."""
+    candidates = [
+        "taiex_total_index:收盤指數",
+        "market_transaction_info:收盤指數",
+        "stock_index_price:收盤指數",
+        "benchmark_return:發行量加權股價報酬指數",
+    ]
+    print("\n=== FinLab index dataset diagnostics ===")
+    for ds in candidates:
+        print(f"\n--- {ds} ---")
+        try:
+            x = data.get(ds)
+        except Exception as exc:
+            print(f"ERROR: {type(exc).__name__}: {exc}")
+            continue
+
+        print("type:", type(x))
+        print("shape:", getattr(x, "shape", None))
+        if hasattr(x, "index") and len(x.index):
+            print("index_min:", x.index.min())
+            print("index_max:", x.index.max())
+        if isinstance(x, pd.DataFrame):
+            print("columns_sample:", list(map(str, x.columns[:30])))
+            if d in x.index:
+                row = x.loc[d]
+                if isinstance(row, pd.Series):
+                    nonnull = row.dropna()
+                    print("target_date_nonnull_count:", len(nonnull))
+                    print(nonnull.head(50).to_string())
+        elif isinstance(x, pd.Series):
+            print("name:", x.name)
+            if d in x.index:
+                print("target_date_value:", x.loc[d])
+            around = x.loc[(x.index >= d - pd.Timedelta(days=5)) & (x.index <= d)]
+            print("around_target:")
+            print(around.tail(5).to_string())
+
+
 def print_legacy_comparison(result, stats) -> None:
     target = result.target_date.date()
     print("\n=== Legacy TWSE/TPEX comparison ===")
@@ -152,11 +186,9 @@ def print_legacy_comparison(result, stats) -> None:
     except Exception as exc:
         print("[WARNING] Legacy TWSE/TPEX comparison unavailable; FinLab validation remains valid.")
         print(f"reason: {type(exc).__name__}: {exc}")
-        print("This failure is isolated to the external legacy exchange API and does not affect FinLab-only output.")
         return
 
     old_stats = legacy.calc_breadth(old_df, taiex_pct=old_taiex, include_vs_market=False)
-
     keys = ["漲停", "大漲", "小漲", "平盤", "小跌", "大跌", "跌停", "總上漲", "總下跌", "總家數"]
     comparison = pd.DataFrame({
         "TWSE_TPEX": [old_stats.get(k) for k in keys],
@@ -180,7 +212,6 @@ def print_legacy_comparison(result, stats) -> None:
     common = sorted(old_symbols & new_symbols)
     old_labels = classify_rows(old_df.loc[common], new_schema=False)
     new_labels = classify_rows(result.stock_df.loc[common], new_schema=True)
-
     row_diff = pd.DataFrame({
         "legacy_pct": pd.to_numeric(old_df.loc[common, "漲跌幅"], errors="coerce"),
         "finlab_pct": pd.to_numeric(result.stock_df.loc[common, "漲跌幅"], errors="coerce"),
@@ -191,19 +222,14 @@ def print_legacy_comparison(result, stats) -> None:
     bucket_diff = row_diff[row_diff["legacy_bucket"].ne(row_diff["finlab_bucket"])].copy()
 
     print("\nPer-symbol bucket differences on common universe:")
-    if bucket_diff.empty:
-        print("  none")
-    else:
-        print(bucket_diff.sort_values(["legacy_bucket", "finlab_bucket", "abs_pct_diff"], ascending=[True, True, False]).to_string())
-
-    print("\nLargest raw percentage differences on common universe:")
-    print(row_diff.sort_values("abs_pct_diff", ascending=False).head(30).to_string())
+    print("  none" if bucket_diff.empty else bucket_diff.to_string())
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", default="2026-08-31")
-    parser.add_argument("--skip-legacy", action="store_true", help="Skip TWSE/TPEX comparison.")
+    parser.add_argument("--skip-legacy", action="store_true")
+    parser.add_argument("--index-diagnostics", action="store_true")
     args = parser.parse_args()
 
     result = load_finlab_market_breadth_data(args.date)
@@ -220,20 +246,8 @@ def main() -> None:
     for k, v in stats.items():
         print(f"  {k}: {v}")
 
-    print("\nLargest absolute moves:")
-    print(
-        result.stock_df.assign(abs_pct=result.stock_df["漲跌幅"].abs())
-        .sort_values("abs_pct", ascending=False)
-        .head(30)[["收盤價", "參考價", "漲跌幅", "成交股數"]]
-        .to_string()
-    )
-
-    print("\nPotential special-security checks:")
-    cats = result.security_categories
-    for s in ["2330", "6415", "9105", "911608"]:
-        row = cats[cats["stock_id"].astype(str).eq(s)]
-        print(f"\n{s}")
-        print(row.to_string(index=False) if not row.empty else "not found")
+    if args.index_diagnostics:
+        print_index_dataset_diagnostics(result.target_date)
 
     if not args.skip_legacy:
         print_legacy_comparison(result, stats)
