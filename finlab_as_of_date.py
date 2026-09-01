@@ -4,9 +4,12 @@
 Rules
 -----
 1. requested_date is None: use the latest date on which every required FinLab
-   production input is available.
+   production input is available and has normal row coverage.
 2. requested_date is explicit: require that exact date to be complete; never
    silently fall back to a prior trading day.
+3. A date is not considered complete merely because one value has appeared.
+   Broad stock datasets must have at least 90% of the recent normal non-null
+   row coverage, which protects the pipeline from FinLab partial updates.
 
 The resolver intentionally runs before Fubon reconciliation / Google Sheet
 writes so a partial or unavailable FinLab date fails early.
@@ -28,6 +31,9 @@ FOREIGN_BUY_CANDIDATES = [
 ]
 INDEX_DATASET = "market_transaction_info:收盤指數"
 INDEX_SYMBOLS = ("TAIEX", "OTC")
+COVERAGE_LOOKBACK = 5
+MIN_COVERAGE_RATIO = 0.90
+MIN_ABSOLUTE_NON_NULL = 100
 
 
 @dataclass(frozen=True)
@@ -37,6 +43,7 @@ class AsOfDateResolution:
     latest_complete_date: pd.Timestamp
     foreign_dataset: str
     latest_by_source: dict[str, str]
+    coverage_by_source: dict[str, dict[str, float | int | str]]
 
     @property
     def effective_date_str(self) -> str:
@@ -54,10 +61,33 @@ def _normalize_date(value: str | pd.Timestamp) -> pd.Timestamp:
         raise ValueError(f"無法解析 as_of_date: {value!r}") from exc
 
 
-def _valid_rows(df: pd.DataFrame) -> pd.Series:
+def _coverage_complete_rows(
+    df: pd.DataFrame,
+    *,
+    lookback: int = COVERAGE_LOOKBACK,
+    min_ratio: float = MIN_COVERAGE_RATIO,
+    min_absolute: int = MIN_ABSOLUTE_NON_NULL,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Return completeness mask, row counts, and historical coverage baseline.
+
+    The baseline for date d is the median non-null count of the previous
+    ``lookback`` rows, so a partially populated current row cannot lower its own
+    threshold. This is a data-readiness gate only; it does not alter strategy
+    data or fill missing values.
+    """
     if df is None or df.empty:
         raise RuntimeError("FinLab dataset 為空。")
-    return df.notna().any(axis=1)
+
+    counts = df.notna().sum(axis=1).astype(float)
+    baseline = counts.shift(1).rolling(lookback, min_periods=min(3, lookback)).median()
+    threshold = (baseline * min_ratio).clip(lower=float(min_absolute))
+
+    complete = counts.ge(threshold) & baseline.notna()
+    # Preserve historical usability near the very beginning of a dataset while
+    # keeping the production/latest-date check conservative.
+    early = baseline.isna() & counts.ge(float(min_absolute))
+    complete = complete | early
+    return complete, counts, baseline
 
 
 def _load_foreign_buy() -> tuple[pd.DataFrame, str]:
@@ -89,6 +119,11 @@ def resolve_finlab_as_of_date(
         raise RuntimeError(f"{INDEX_DATASET} 缺少欄位: {sorted(missing_index)}")
     index_close = index_close.loc[:, list(INDEX_SYMBOLS)]
 
+    close_ok, close_counts, close_baseline = _coverage_complete_rows(close)
+    volume_ok, volume_counts, volume_baseline = _coverage_complete_rows(volume)
+    foreign_ok, foreign_counts, foreign_baseline = _coverage_complete_rows(foreign)
+    index_ok = index_close.notna().all(axis=1)
+
     common_index = close.index.intersection(volume.index)
     common_index = common_index.intersection(foreign.index)
     common_index = common_index.intersection(index_close.index)
@@ -96,10 +131,10 @@ def resolve_finlab_as_of_date(
         raise RuntimeError("必要 FinLab datasets 沒有共同日期。")
 
     complete = (
-        _valid_rows(close.reindex(common_index))
-        & _valid_rows(volume.reindex(common_index))
-        & _valid_rows(foreign.reindex(common_index))
-        & index_close.reindex(common_index).notna().all(axis=1)
+        close_ok.reindex(common_index, fill_value=False)
+        & volume_ok.reindex(common_index, fill_value=False)
+        & foreign_ok.reindex(common_index, fill_value=False)
+        & index_ok.reindex(common_index, fill_value=False)
     )
     complete_dates = pd.DatetimeIndex(common_index[complete.to_numpy()])
     if len(complete_dates) == 0:
@@ -117,17 +152,47 @@ def resolve_finlab_as_of_date(
             )
         effective = requested
 
-    def latest_valid(df: pd.DataFrame, require_all: bool = False) -> str:
-        valid = df.notna().all(axis=1) if require_all else df.notna().any(axis=1)
-        if not valid.any():
+    def latest_true(mask: pd.Series) -> str:
+        mask = mask.fillna(False)
+        if not mask.any():
             return ""
-        return str(pd.Timestamp(df.index[valid][-1]).date())
+        return str(pd.Timestamp(mask.index[mask][-1]).date())
 
     latest_by_source = {
-        "price:收盤價": latest_valid(close),
-        "price:成交股數": latest_valid(volume),
-        foreign_field: latest_valid(foreign),
-        INDEX_DATASET: latest_valid(index_close, require_all=True),
+        "price:收盤價": latest_true(close_ok),
+        "price:成交股數": latest_true(volume_ok),
+        foreign_field: latest_true(foreign_ok),
+        INDEX_DATASET: latest_true(index_ok),
+    }
+
+    def coverage_snapshot(
+        name: str,
+        counts: pd.Series,
+        baseline: pd.Series,
+    ) -> dict[str, float | int | str]:
+        d = effective
+        count = float(counts.get(d, 0.0))
+        base = float(baseline.get(d, float("nan")))
+        ratio = count / base if pd.notna(base) and base > 0 else float("nan")
+        return {
+            "date": str(d.date()),
+            "non_null_count": int(count),
+            "recent_baseline": round(base, 2) if pd.notna(base) else "nan",
+            "coverage_ratio": round(ratio, 4) if pd.notna(ratio) else "nan",
+            "minimum_ratio": MIN_COVERAGE_RATIO,
+        }
+
+    coverage_by_source = {
+        "price:收盤價": coverage_snapshot("price:收盤價", close_counts, close_baseline),
+        "price:成交股數": coverage_snapshot("price:成交股數", volume_counts, volume_baseline),
+        foreign_field: coverage_snapshot(foreign_field, foreign_counts, foreign_baseline),
+        INDEX_DATASET: {
+            "date": str(effective.date()),
+            "non_null_count": int(index_close.loc[effective].notna().sum()),
+            "recent_baseline": len(INDEX_SYMBOLS),
+            "coverage_ratio": 1.0,
+            "minimum_ratio": 1.0,
+        },
     }
 
     return AsOfDateResolution(
@@ -136,4 +201,5 @@ def resolve_finlab_as_of_date(
         latest_complete_date=latest_complete,
         foreign_dataset=foreign_field,
         latest_by_source=latest_by_source,
+        coverage_by_source=coverage_by_source,
     )
