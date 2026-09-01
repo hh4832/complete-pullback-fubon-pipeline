@@ -2,6 +2,18 @@ name: Run full pipeline daily
 
 on:
   workflow_dispatch:
+  schedule:
+    # FinLab datasets may finish updating after midnight.
+    # UTC -> Asia/Taipei (UTC+8, no DST):
+    # 14:30 -> 22:30 same day
+    # 16:30 -> 00:30 next day
+    # 19:30 -> 03:30 next day
+    # 22:30 -> 06:30 next day
+    # UTC Mon-Fri therefore covers Taiwan Mon-Fri evening + Tue-Sat early morning.
+    - cron: "30 14 * * 1-5"
+    - cron: "30 16 * * 1-5"
+    - cron: "30 19 * * 1-5"
+    - cron: "30 22 * * 1-5"
 
 permissions:
   contents: read
@@ -17,58 +29,13 @@ jobs:
     timeout-minutes: 90
     env:
       TZ: Asia/Taipei
+      QUANT_RESEARCH_REMOTE_ROOT: gdrive:Quant_Research/complete-pullback-fubon-pipeline
 
     steps:
-      - name: Check whether today's scheduled run already succeeded
-        id: daily_guard
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Manual runs should always execute.
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run: bypass daily guard."
-            exit 0
-          fi
-
-          TODAY_TAIPEI="$(TZ=Asia/Taipei date +%F)"
-          CURRENT_RUN_ID="${GITHUB_RUN_ID}"
-
-          WORKFLOW_ID="$(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CURRENT_RUN_ID}" --jq '.workflow_id'
-          )"
-
-          PRIOR_SUCCESS="$(
-            gh api -H "Accept: application/vnd.github+json" "repos/${GITHUB_REPOSITORY}/actions/workflows/${WORKFLOW_ID}/runs?event=schedule&status=success&per_page=100" --jq '.workflow_runs[] | [.id, .created_at] | @tsv' |
-            while IFS=$'\t' read -r RUN_ID CREATED_AT; do
-              [ "$RUN_ID" = "$CURRENT_RUN_ID" ] && continue
-
-              RUN_DATE_TAIPEI="$(
-                TZ=Asia/Taipei date -d "$CREATED_AT" +%F
-              )"
-
-              if [ "$RUN_DATE_TAIPEI" = "$TODAY_TAIPEI" ]; then
-                echo "$RUN_ID"
-                break
-              fi
-            done
-          )"
-
-          if [ -n "$PRIOR_SUCCESS" ]; then
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "A scheduled run already succeeded today (run_id=${PRIOR_SUCCESS}). Skip duplicate execution."
-          else
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "No successful scheduled run found for today. Continue."
-          fi
-
       - name: Check out repository
-        if: steps.daily_guard.outputs.should_run == 'true'
         uses: actions/checkout@v6
 
       - name: Set up Python
-        if: steps.daily_guard.outputs.should_run == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -76,25 +43,11 @@ jobs:
           cache-dependency-path: requirements-github.txt
 
       - name: Install Python dependencies
-        if: steps.daily_guard.outputs.should_run == 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-github.txt
 
-      - name: Install official Fubon Neo Linux SDK
-        if: steps.daily_guard.outputs.should_run == 'true'
-        shell: bash
-        run: |
-          curl --fail --location --retry 3 \
-            "https://www.fbs.com.tw/TradeAPI_SDK/fubon_binary/fubon_neo-2.2.9-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.zip" \
-            --output "$RUNNER_TEMP/fubon-neo.zip"
-          unzip -q "$RUNNER_TEMP/fubon-neo.zip" -d "$RUNNER_TEMP/fubon-neo"
-          wheel_path="$(find "$RUNNER_TEMP/fubon-neo" -type f -name '*.whl' -print -quit)"
-          test -n "$wheel_path"
-          python -m pip install "$wheel_path"
-
       - name: Install rclone
-        if: steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           curl --fail --location --retry 3 \
@@ -107,7 +60,6 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Restore encrypted credentials
-        if: steps.daily_guard.outputs.should_run == 'true'
         shell: bash
         env:
           FUBON_CERT_BASE64: ${{ secrets.FUBON_CERT_BASE64 }}
@@ -121,12 +73,97 @@ jobs:
           printf '%s' "$GOOGLE_SERVICE_ACCOUNT_BASE64" | base64 --decode > service_account.json
           printf '%s' "$RCLONE_CONFIG_BASE64" | base64 --decode > "$RUNNER_TEMP/rclone.conf"
           chmod 600 "$RUNNER_TEMP/fubon-cert.pfx" service_account.json "$RUNNER_TEMP/rclone.conf"
-          echo "RUN_DATE=$(date +%Y%m%d)" >> "$GITHUB_ENV"
 
-      - name: Restore strategy state from Google Drive
-        if: steps.daily_guard.outputs.should_run == 'true'
+      - name: Resolve complete FinLab as-of date
+        id: asof
+        env:
+          FINLAB_API_TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
         shell: bash
         run: |
+          python - <<'PY' > "$RUNNER_TEMP/asof.env"
+          from finlab_as_of_date import resolve_finlab_as_of_date
+
+          r = resolve_finlab_as_of_date()
+          print(f"AS_OF_DATE={r.effective_date_str}")
+          print(f"AS_OF_COMPACT={r.effective_date.strftime('%Y%m%d')}")
+          print(f"FOREIGN_DATASET={r.foreign_dataset}")
+          for key, value in r.latest_by_source.items():
+              safe = key.replace('=', '_').replace('\n', ' ')
+              print(f"SOURCE::{safe}::{value}")
+          for key, info in r.coverage_by_source.items():
+              safe = key.replace('=', '_').replace('\n', ' ')
+              print(
+                  f"COVERAGE::{safe}::count={info['non_null_count']}::"
+                  f"baseline={info['recent_baseline']}::ratio={info['coverage_ratio']}::"
+                  f"minimum={info['minimum_ratio']}"
+              )
+          PY
+
+          AS_OF_DATE="$(grep '^AS_OF_DATE=' "$RUNNER_TEMP/asof.env" | cut -d= -f2-)"
+          AS_OF_COMPACT="$(grep '^AS_OF_COMPACT=' "$RUNNER_TEMP/asof.env" | cut -d= -f2-)"
+          test -n "$AS_OF_DATE"
+          test -n "$AS_OF_COMPACT"
+          echo "as_of_date=$AS_OF_DATE" >> "$GITHUB_OUTPUT"
+          echo "as_of_compact=$AS_OF_COMPACT" >> "$GITHUB_OUTPUT"
+          echo "AS_OF_DATE=$AS_OF_DATE" >> "$GITHUB_ENV"
+          echo "AS_OF_COMPACT=$AS_OF_COMPACT" >> "$GITHUB_ENV"
+          echo "Resolved effective_as_of_date=$AS_OF_DATE"
+          cat "$RUNNER_TEMP/asof.env"
+
+      - name: Check scheduled target and duplicate completion
+        id: asof_guard
+        shell: bash
+        run: |
+          # Manual runs intentionally bypass the date/duplicate guard so an
+          # operator can rerun a date for diagnosis.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run: bypass scheduled as-of-date guard."
+            exit 0
+          fi
+
+          HOUR_TAIPEI="$(TZ=Asia/Taipei date +%H)"
+          if [ "$HOUR_TAIPEI" -ge 12 ]; then
+            EXPECTED_AS_OF="$(TZ=Asia/Taipei date +%F)"
+          else
+            EXPECTED_AS_OF="$(TZ=Asia/Taipei date -d 'yesterday' +%F)"
+          fi
+          echo "Scheduled expected_as_of_date=$EXPECTED_AS_OF"
+          echo "Resolved effective_as_of_date=$AS_OF_DATE"
+
+          if [ "$AS_OF_DATE" != "$EXPECTED_AS_OF" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "FinLab is not complete for expected date yet. Wait for the next trigger."
+            exit 0
+          fi
+
+          MARKER="${QUANT_RESEARCH_REMOTE_ROOT}/_state/completed_as_of/${AS_OF_DATE}.txt"
+          if rclone --config "$RUNNER_TEMP/rclone.conf" cat "$MARKER" >/dev/null 2>&1; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "effective_as_of_date=${AS_OF_DATE} already completed. Skip duplicate scheduled run."
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "effective_as_of_date=${AS_OF_DATE} is ready and has no completion marker. Continue."
+          fi
+
+      - name: Install official Fubon Neo Linux SDK
+        if: steps.asof_guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 \
+            "https://www.fbs.com.tw/TradeAPI_SDK/fubon_binary/fubon_neo-2.2.9-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.zip" \
+            --output "$RUNNER_TEMP/fubon-neo.zip"
+          unzip -q "$RUNNER_TEMP/fubon-neo.zip" -d "$RUNNER_TEMP/fubon-neo"
+          wheel_path="$(find "$RUNNER_TEMP/fubon-neo" -type f -name '*.whl' -print -quit)"
+          test -n "$wheel_path"
+          python -m pip install "$wheel_path"
+
+      - name: Restore strategy state from Google Drive
+        if: steps.asof_guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          # Keep the existing state location for now to avoid a state migration
+          # during this output/scheduling change.
           mkdir -p strategy_ledger
           rclone --config "$RUNNER_TEMP/rclone.conf" copy \
             "gdrive:Complete_Pullback_Fubon_Pipeline/state/strategy_ledger" \
@@ -136,8 +173,22 @@ jobs:
             holdings_entry_conditions.csv
           test -f holdings_entry_conditions.csv
 
+      - name: Prepare unique run archive name
+        if: steps.asof_guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          RUN_TIMESTAMP="$(TZ=Asia/Taipei date +%Y%m%d_%H%M%S)"
+          GIT_SHORT="$(git rev-parse --short HEAD)"
+          RUN_NAME="${RUN_TIMESTAMP}_${GIT_SHORT}"
+          RUN_REMOTE="${QUANT_RESEARCH_REMOTE_ROOT}/${RUN_NAME}"
+          echo "RUN_TIMESTAMP=$RUN_TIMESTAMP" >> "$GITHUB_ENV"
+          echo "GIT_SHORT=$GIT_SHORT" >> "$GITHUB_ENV"
+          echo "RUN_NAME=$RUN_NAME" >> "$GITHUB_ENV"
+          echo "RUN_REMOTE=$RUN_REMOTE" >> "$GITHUB_ENV"
+          echo "Archive destination: $RUN_REMOTE"
+
       - name: Run complete pipeline
-        if: steps.daily_guard.outputs.should_run == 'true'
+        if: steps.asof_guard.outputs.should_run == 'true'
         id: pipeline
         shell: bash
         env:
@@ -154,8 +205,30 @@ jobs:
           echo "PIPELINE_EXIT_CODE=$pipeline_exit_code" >> "$GITHUB_ENV"
           exit 0
 
+      - name: Write run info
+        if: always() && steps.asof_guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          {
+            echo "timestamp_taipei=${RUN_TIMESTAMP:-unknown}"
+            echo "timezone=Asia/Taipei"
+            echo "requested_as_of_date=auto"
+            echo "effective_as_of_date=${AS_OF_DATE:-unknown}"
+            echo "git_commit=${GITHUB_SHA}"
+            echo "git_commit_short=${GIT_SHORT:-unknown}"
+            echo "git_branch=${GITHUB_REF_NAME}"
+            echo "github_event=${GITHUB_EVENT_NAME}"
+            echo "github_run_id=${GITHUB_RUN_ID}"
+            echo "pipeline_exit_code=${PIPELINE_EXIT_CODE:-unknown}"
+            echo "market_breadth_source=FinLab"
+            echo "archive_path=${RUN_REMOTE:-unknown}"
+            echo "finlab_source_status_begin"
+            cat "$RUNNER_TEMP/asof.env"
+            echo "finlab_source_status_end"
+          } > run_info.txt
+
       - name: Back up strategy state to Google Drive
-        if: always() && steps.daily_guard.outputs.should_run == 'true'
+        if: always() && steps.asof_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           if [ -d strategy_ledger ]; then
@@ -169,49 +242,72 @@ jobs:
               "gdrive:Complete_Pullback_Fubon_Pipeline/state/holdings_entry_conditions.csv"
           fi
 
-      - name: Upload outputs to Google Drive
-        if: always() && steps.daily_guard.outputs.should_run == 'true'
+      - name: Upload timestamped archive to Google Drive
+        if: always() && steps.asof_guard.outputs.should_run == 'true'
         shell: bash
         run: |
           if [ -d output_selector ]; then
             rclone --config "$RUNNER_TEMP/rclone.conf" copy \
-              output_selector \
-              "gdrive:Complete_Pullback_Fubon_Pipeline/runs/$RUN_DATE/output_selector"
+              output_selector "${RUN_REMOTE}/output_selector"
           fi
           if [ -d output_integrated_stock ]; then
             rclone --config "$RUNNER_TEMP/rclone.conf" copy \
-              output_integrated_stock \
-              "gdrive:Complete_Pullback_Fubon_Pipeline/runs/$RUN_DATE/output_integrated_stock"
+              output_integrated_stock "${RUN_REMOTE}/output_integrated_stock"
+          fi
+          if [ -d strategy_ledger ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copy \
+              strategy_ledger "${RUN_REMOTE}/strategy_ledger"
           fi
           if [ -f pipeline.log ]; then
             rclone --config "$RUNNER_TEMP/rclone.conf" copyto \
-              pipeline.log \
-              "gdrive:Complete_Pullback_Fubon_Pipeline/runs/$RUN_DATE/pipeline.log"
+              pipeline.log "${RUN_REMOTE}/pipeline.log"
+          fi
+          if [ -f run_info.txt ]; then
+            rclone --config "$RUNNER_TEMP/rclone.conf" copyto \
+              run_info.txt "${RUN_REMOTE}/run_info.txt"
           fi
 
+      - name: Mark as-of date completed
+        if: steps.asof_guard.outputs.should_run == 'true' && env.PIPELINE_EXIT_CODE == '0'
+        shell: bash
+        run: |
+          MARKER_LOCAL="$RUNNER_TEMP/completed_as_of.txt"
+          {
+            echo "effective_as_of_date=${AS_OF_DATE}"
+            echo "timestamp_taipei=${RUN_TIMESTAMP}"
+            echo "git_commit=${GITHUB_SHA}"
+            echo "github_run_id=${GITHUB_RUN_ID}"
+            echo "archive_path=${RUN_REMOTE}"
+          } > "$MARKER_LOCAL"
+          rclone --config "$RUNNER_TEMP/rclone.conf" copyto \
+            "$MARKER_LOCAL" \
+            "${QUANT_RESEARCH_REMOTE_ROOT}/_state/completed_as_of/${AS_OF_DATE}.txt"
+
       - name: Upload GitHub Artifact
-        if: always() && steps.daily_guard.outputs.should_run == 'true'
+        if: always() && steps.asof_guard.outputs.should_run == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: pipeline-${{ env.RUN_DATE }}-${{ github.run_id }}
+          name: pipeline-${{ env.AS_OF_COMPACT }}-${{ github.run_id }}
           path: |
             output_selector/
             output_integrated_stock/
+            strategy_ledger/
             pipeline.log
+            run_info.txt
           if-no-files-found: warn
           retention-days: 30
 
       - name: Send result email
-        if: always() && steps.daily_guard.outputs.should_run == 'true'
+        if: always() && steps.asof_guard.outputs.should_run == 'true'
         env:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           PIPELINE_EXIT_CODE: ${{ env.PIPELINE_EXIT_CODE }}
-          RUN_DATE: ${{ env.RUN_DATE }}
+          RUN_DATE: ${{ env.AS_OF_COMPACT }}
         run: python send_pipeline_email.py
 
       - name: Mark workflow failed when pipeline failed
-        if: always() && steps.daily_guard.outputs.should_run == 'true'
+        if: always() && steps.asof_guard.outputs.should_run == 'true'
         shell: bash
         run: test "${PIPELINE_EXIT_CODE:-1}" -eq 0
