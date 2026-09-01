@@ -90,6 +90,13 @@ jobs:
           for key, value in r.latest_by_source.items():
               safe = key.replace('=', '_').replace('\n', ' ')
               print(f"SOURCE::{safe}::{value}")
+          for key, info in r.coverage_by_source.items():
+              safe = key.replace('=', '_').replace('\n', ' ')
+              print(
+                  f"COVERAGE::{safe}::count={info['non_null_count']}::"
+                  f"baseline={info['recent_baseline']}::ratio={info['coverage_ratio']}::"
+                  f"minimum={info['minimum_ratio']}"
+              )
           PY
 
           AS_OF_DATE="$(grep '^AS_OF_DATE=' "$RUNNER_TEMP/asof.env" | cut -d= -f2-)"
@@ -103,26 +110,40 @@ jobs:
           echo "Resolved effective_as_of_date=$AS_OF_DATE"
           cat "$RUNNER_TEMP/asof.env"
 
-      - name: Check whether this as-of date already completed
+      - name: Check scheduled target and duplicate completion
         id: asof_guard
         shell: bash
         run: |
-          # Manual runs intentionally bypass the duplicate guard so an operator
-          # can rerun a date for diagnosis. Scheduled runs are idempotent by
-          # effective_as_of_date, even when triggers cross midnight.
+          # Manual runs intentionally bypass the date/duplicate guard so an
+          # operator can rerun a date for diagnosis.
           if [ "${{ github.event_name }}" != "schedule" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run: bypass as-of-date completion guard."
+            echo "Manual run: bypass scheduled as-of-date guard."
+            exit 0
+          fi
+
+          HOUR_TAIPEI="$(TZ=Asia/Taipei date +%H)"
+          if [ "$HOUR_TAIPEI" -ge 12 ]; then
+            EXPECTED_AS_OF="$(TZ=Asia/Taipei date +%F)"
+          else
+            EXPECTED_AS_OF="$(TZ=Asia/Taipei date -d 'yesterday' +%F)"
+          fi
+          echo "Scheduled expected_as_of_date=$EXPECTED_AS_OF"
+          echo "Resolved effective_as_of_date=$AS_OF_DATE"
+
+          if [ "$AS_OF_DATE" != "$EXPECTED_AS_OF" ]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "FinLab is not complete for expected date yet. Wait for the next trigger."
             exit 0
           fi
 
           MARKER="${QUANT_RESEARCH_REMOTE_ROOT}/_state/completed_as_of/${AS_OF_DATE}.txt"
-          if rclone --config "$RUNNER_TEMP/rclone.conf" lsf "$MARKER" >/dev/null 2>&1; then
+          if rclone --config "$RUNNER_TEMP/rclone.conf" cat "$MARKER" >/dev/null 2>&1; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             echo "effective_as_of_date=${AS_OF_DATE} already completed. Skip duplicate scheduled run."
           else
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "effective_as_of_date=${AS_OF_DATE} has no completion marker. Continue."
+            echo "effective_as_of_date=${AS_OF_DATE} is ready and has no completion marker. Continue."
           fi
 
       - name: Install official Fubon Neo Linux SDK
