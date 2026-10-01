@@ -11,6 +11,7 @@ from finlab_as_of_date import AsOfDateResolution, resolve_finlab_as_of_date
 from finlab_market_breadth import fetch_finlab_market_snapshot
 from integrated_stock_pipeline_strategy_complete_v2 import PipelineConfig
 from complete_pullback_fubon_pipeline_v2 import CompletePipelineConfig, run_complete_daily_pipeline
+from pipeline_observability import PipelineProgress
 
 
 # Production market breadth source: FinLab-only.
@@ -160,8 +161,16 @@ def resolve_production_as_of_date() -> AsOfDateResolution:
 if __name__ == "__main__":
     PROJECT_DIR = Path(__file__).resolve().parent
 
+    progress = PipelineProgress(total=3, label="PRODUCTION_RUNNER")
+
     # Resolve one complete FinLab date BEFORE any broker/Google Sheet write.
-    as_of = resolve_production_as_of_date()
+    as_of = progress.run("Resolve complete FinLab as-of date", resolve_production_as_of_date)
+    progress.diagnostic(
+        "as_of_date",
+        effective=as_of.effective_date_str,
+        latest_complete=as_of.latest_complete_date_str,
+        sources=len(as_of.latest_by_source),
+    )
 
     broker_config = PipelineConfig(
         target_date=as_of.effective_date_str,
@@ -200,7 +209,7 @@ if __name__ == "__main__":
         create_order_intents=True,
     )
 
-    result = run_complete_daily_pipeline(config)
+    result = progress.run("Run complete Fubon + selector pipeline", run_complete_daily_pipeline, config)
 
     print("\n========== 完成 ==========")
     print("Effective as_of_date:", as_of.effective_date_str)
@@ -209,7 +218,17 @@ if __name__ == "__main__":
     print("New intents:", len(result["new_order_intents"]))
     print("Intent file:", result["order_intent_path"])
 
+    archive_status = "SKIPPED"
     try:
-        archive_run_to_google_drive(PROJECT_DIR, result, as_of=as_of)
+        archive_path = progress.run("Archive run to mounted Google Drive", archive_run_to_google_drive, PROJECT_DIR, result, as_of=as_of)
+        archive_status = "WRITTEN" if archive_path is not None else "NOT_MOUNTED"
     except Exception as exc:
+        archive_status = f"FAILED:{type(exc).__name__}"
         print(f"[WARN] Output archive 失敗：{exc}")
+    progress.finish(
+        "SUCCESS",
+        effective_as_of_date=as_of.effective_date_str,
+        buy_candidates=len(result["selection"]["buy_list"]),
+        new_intents=len(result["new_order_intents"]),
+        archive_status=archive_status,
+    )

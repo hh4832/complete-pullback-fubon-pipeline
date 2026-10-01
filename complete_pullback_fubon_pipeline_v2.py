@@ -19,6 +19,7 @@ from integrated_stock_pipeline_strategy_complete_v2 import (
     run_pipeline as run_broker_pipeline,
 )
 import pullback_macdonly_daily_selector_v2 as selector
+from pipeline_observability import PipelineProgress
 
 
 ORDER_INTENT_COLUMNS = [
@@ -189,6 +190,7 @@ def run_complete_daily_pipeline(
     3) Append basic order intents for the next session.
     """
     config = config or CompletePipelineConfig()
+    progress = PipelineProgress(total=3 if config.run_broker_first else 2, label="COMPLETE_DAILY")
     # Keep the live broker/exit watcher aligned with the validated Day-35 strategy.
     config.broker_config.min_holding_trading_days = 35
     config.broker_config.close_loss_threshold = 0.15
@@ -198,8 +200,9 @@ def run_complete_daily_pipeline(
     inventory = pd.DataFrame()
     if config.run_broker_first:
         print("\n========== A. 富邦盤後 / 策略帳本 ==========")
-        broker_result = run_broker_pipeline(config.broker_config)
+        broker_result = progress.run("Fubon reconciliation and strategy ledger", run_broker_pipeline, config.broker_config)
         inventory = broker_result.get("inventory", pd.DataFrame())
+        progress.diagnostic("broker_state", inventory_rows=len(inventory))
 
     holdings_path = _inventory_as_holdings_file(inventory, config)
 
@@ -211,23 +214,39 @@ def run_complete_daily_pipeline(
     selector_cfg["POSITION_PCT"] = 0.05
 
     print("\n========== B. FinLab 收盤選股 ==========")
-    selection = selector.build_daily_candidates(
+    selection = progress.run(
+        "FinLab close-based stock selection",
+        selector.build_daily_candidates,
         cfg=selector_cfg,
         holdings_path=str(holdings_path),
         total_equity=config.selector_total_equity,
         signal_date=config.selector_signal_date,
+    )
+    progress.diagnostic(
+        "selection",
+        signal_date=selection.get("signal_date", "unknown"),
+        buy_candidates=len(selection.get("buy_list", [])),
+        inventory_rows=len(inventory),
     )
     selector.save_daily_selection(selection, output_dir=str(config.selector_output_dir))
 
     new_intents = pd.DataFrame(columns=ORDER_INTENT_COLUMNS)
     if config.create_order_intents:
         print("\n========== C. 建立基本 order intent ==========")
-        new_intents = append_basic_order_intents(
+        new_intents = progress.run(
+            "Persist idempotent order intents",
+            append_basic_order_intents,
             selection["buy_list"],
             selection["signal_date"],
             config,
         )
 
+    progress.finish(
+        "SUCCESS",
+        signal_date=selection.get("signal_date", "unknown"),
+        buy_candidates=len(selection.get("buy_list", [])),
+        new_intents=len(new_intents),
+    )
     return {
         "broker": broker_result,
         "selection": selection,

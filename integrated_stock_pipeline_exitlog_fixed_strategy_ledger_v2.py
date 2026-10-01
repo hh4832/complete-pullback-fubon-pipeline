@@ -196,26 +196,47 @@ def normalize_stock_no(x: Any) -> str:
     return s
 
 
+def _result_diagnostic(result: Any) -> str:
+    """Return bounded, non-secret metadata for step completion logs."""
+    if isinstance(result, pd.DataFrame):
+        return f"rows={len(result)} cols={len(result.columns)}"
+    if isinstance(result, pd.Series):
+        return f"rows={len(result)}"
+    if isinstance(result, dict):
+        return f"dict_keys={len(result)}"
+    if isinstance(result, (list, tuple, set)):
+        return f"items={len(result)}"
+    return f"type={type(result).__name__}"
+
+
 def run_required_step(name: str, func: Callable, config: PipelineConfig, *args, **kwargs):
-    print(f"\n[STEP] {name}")
+    started = time.perf_counter()
+    print(f"\n[STEP] START {name}")
     try:
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
     except Exception as e:
+        print(f"[STEP] FAIL  {name} | elapsed={time.perf_counter() - started:.2f}s | error={type(e).__name__}")
         print(f"[ERROR] {name} 失敗：{e}")
         if config.debug:
             traceback.print_exc()
         raise
+    print(f"[STEP] DONE  {name} | elapsed={time.perf_counter() - started:.2f}s | {_result_diagnostic(result)}")
+    return result
 
 
 def run_optional_step(name: str, func: Callable, config: PipelineConfig, *args, default=None, **kwargs):
-    print(f"\n[STEP] {name}")
+    started = time.perf_counter()
+    print(f"\n[STEP] START {name}")
     try:
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
     except Exception as e:
+        print(f"[STEP] FAIL  {name} | elapsed={time.perf_counter() - started:.2f}s | error={type(e).__name__}")
         print(f"[WARNING] {name} 失敗，但流程繼續：{e}")
         if config.debug:
             traceback.print_exc()
         return default
+    print(f"[STEP] DONE  {name} | elapsed={time.perf_counter() - started:.2f}s | {_result_diagnostic(result)}")
+    return result
 
 
 # ============================================================
