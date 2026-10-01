@@ -190,7 +190,10 @@ def run_complete_daily_pipeline(
     3) Append basic order intents for the next session.
     """
     config = config or CompletePipelineConfig()
-    progress = PipelineProgress(total=3 if config.run_broker_first else 2, label="COMPLETE_DAILY")
+    progress = PipelineProgress(
+        total=(1 if config.run_broker_first else 0) + 1 + (1 if config.create_order_intents else 0),
+        label="COMPLETE_DAILY",
+    )
     # Keep the live broker/exit watcher aligned with the validated Day-35 strategy.
     config.broker_config.min_holding_trading_days = 35
     config.broker_config.close_loss_threshold = 0.15
