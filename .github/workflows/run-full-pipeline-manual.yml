@@ -1,6 +1,8 @@
 name: Run full pipeline daily
 
 on:
+  repository_dispatch:
+    types: [fubon-pipeline-daily]
   workflow_dispatch:
   schedule:
     # FinLab datasets may finish updating after midnight.
@@ -116,9 +118,9 @@ jobs:
         run: |
           # Manual runs intentionally bypass the date/duplicate guard so an
           # operator can rerun a date for diagnosis.
-          if [ "${{ github.event_name }}" != "schedule" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run: bypass scheduled as-of-date guard."
+            echo "Explicit manual run: bypass automatic as-of-date guard."
             exit 0
           fi
 
