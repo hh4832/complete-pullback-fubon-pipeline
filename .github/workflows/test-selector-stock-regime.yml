@@ -1,0 +1,25 @@
+name: Selector stock-regime regression
+
+on:
+  pull_request:
+    paths:
+      - pullback_macdonly_daily_selector_v2.py
+      - test_selector_stock_regime.py
+      - .github/workflows/test-selector-stock-regime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-stock-regime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install local-only test dependencies
+        run: python -m pip install numpy pandas tqdm
+      - name: Run stock-regime regression tests
+        run: python -m unittest -v test_selector_stock_regime
