@@ -289,13 +289,16 @@ def build_stock_regime_filter(adj_close, cfg):
     ma_mid = rolling_mean(adj_close, cfg["MA_MID"])
     ma_slow = rolling_mean(adj_close, cfg["MA_SLOW"])
 
+    # A missing MA120 cannot be interpreted as "not bearish": NaN comparisons
+    # are False and negating bear_stack would incorrectly admit new listings.
+    ma_ready = ma_fast.notna() & ma_mid.notna() & ma_slow.notna()
     bear_stack = (ma_fast < ma_mid) & (ma_mid < ma_slow)
     bull_stack = (ma_fast > ma_mid) & (ma_mid > ma_slow)
 
     mode = cfg["STOCK_REGIME_MODE"]
 
     if mode == "not_bear_stack":
-        regime_filter = ~bear_stack
+        regime_filter = ma_ready & ~bear_stack
 
     elif mode == "close_above_ma120":
         regime_filter = adj_close > ma_slow
@@ -313,6 +316,7 @@ def build_stock_regime_filter(adj_close, cfg):
         "ma_fast": ma_fast,
         "ma_mid": ma_mid,
         "ma_slow": ma_slow,
+        "ma_ready": ma_ready,
         "bear_stack": bear_stack,
         "bull_stack": bull_stack,
         "regime_filter": regime_filter,
@@ -591,6 +595,7 @@ def build_entry_signal(adj_close, volume, foreign_buy, cfg):
         "bear_stack": bear_stack,
         "bull_stack": bull_stack,
         "stock_regime_filter": stock_regime_filter,
+        "stock_ma_ready": regime_info["ma_ready"],
 
         "bias": bias,
         "bias_filter": bias_filter,
@@ -697,6 +702,20 @@ def _print_signal_date_diagnostics(
     market_pass = bool(market.loc[d]) if market is not None and d in market.index else True
     stats["market_filter_pass"] = market_pass
     print(f"  {'market_filter_pass':26s}: {market_pass}")
+
+    # Show the otherwise-qualified stocks excluded for incomplete MA history.
+    ma_ready = indicators["stock_ma_ready"].loc[d].fillna(False).astype(bool)
+    missing_ma_candidates = (
+        rows["bias_filter"]
+        & rows["macd_osc_rising"]
+        & rows["foreign_filter"]
+        & ~ma_ready
+    )
+    excluded_ids = sorted(str(s) for s in missing_ma_candidates.index[missing_ma_candidates])
+    stats["missing_ma_candidate_count"] = len(excluded_ids)
+    print(f"  {'missing_ma_candidates':26s}: {len(excluded_ids)}")
+    if excluded_ids:
+        print(f"    missing MA candidate IDs (first 10): {', '.join(excluded_ids[:10])}")
 
     # These are the actual AND operations used by signal_before_market.
     funnel_steps = [
